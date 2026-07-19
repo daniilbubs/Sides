@@ -23,6 +23,9 @@
   const SIDE3_MOBILE_SEGMENTATION_INTERVAL_MS = 48;
   const SIDE3_MOBILE_AFTERIMAGE_SCALE = 0.58;
   const SIDE3_MOBILE_TABLET_AFTERIMAGE_SCALE = 0.66;
+  const SIDE3_MOBILE_AFTERIMAGE_CAPTURE_BLUR_MULTIPLIER = 1.42;
+  const SIDE3_MOBILE_AFTERIMAGE_DRAW_BLUR_MULTIPLIER = 1.36;
+  const SIDE3_MOBILE_AFTERIMAGE_ALPHA_SCALE = 0.86;
   const SIDE3_POSE_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js";
   const SIDE3_POSE_FRAME_INTERVAL_MS = 95;
   const SIDE3_LANDMARK_CONFIDENCE = 0.55;
@@ -1137,7 +1140,7 @@
     targetCtx.globalAlpha = 1;
     targetCtx.globalCompositeOperation = "source-over";
     targetCtx.filter = "none";
-    targetCtx.filter = "blur(" + lerp(1.2, 4.8, echoPower) + "px)";
+    targetCtx.filter = "blur(" + (lerp(1.2, 4.8, echoPower) * getSide3AfterimageCaptureBlurMultiplier()).toFixed(2) + "px)";
     targetCtx.drawImage(stableMaskCanvas, 0, 0);
     targetCtx.filter = "none";
     targetCtx.globalCompositeOperation = "source-in";
@@ -1185,7 +1188,7 @@
     targetCtx.restore();
 
     const life = lerp(SIDE3_AFTERIMAGE_MIN_LIFE, SIDE3_AFTERIMAGE_MAX_LIFE, echoPower) * lerp(0.75, 1.25, hash1(afterimagePoolIndex, 43));
-    const alpha = lerp(0.04, 0.46, echoPower) * clamp(motion / 220, 0.36, 1);
+    const alpha = lerp(0.04, 0.46, echoPower) * clamp(motion / 220, 0.36, 1) * getSide3AfterimageAlphaScale();
 
     afterimages.push({
       canvas: targetCanvas,
@@ -1220,7 +1223,7 @@
 
       const fade = smoothstep(0, 0.12, age) * (1 - smoothstep(0.68, 1, age));
       ctx.globalAlpha = echo.alpha * fade * (0.5 + echoPower * 0.68);
-      ctx.filter = "blur(" + (echo.blur * smoothstep(0.12, 1, age)).toFixed(2) + "px)";
+      ctx.filter = "blur(" + (echo.blur * getSide3AfterimageDrawBlurMultiplier() * smoothstep(0.12, 1, age)).toFixed(2) + "px)";
       ctx.drawImage(echo.canvas, echo.driftX * age, echo.driftY * age, canvas.width, canvas.height);
     }
 
@@ -1958,6 +1961,18 @@
   function getSide3AfterimageScale() {
     if (!isMobilePerformanceProfile()) return 1;
     return isTabletPerformanceProfile() ? SIDE3_MOBILE_TABLET_AFTERIMAGE_SCALE : SIDE3_MOBILE_AFTERIMAGE_SCALE;
+  }
+
+  function getSide3AfterimageCaptureBlurMultiplier() {
+    return isMobilePerformanceProfile() ? SIDE3_MOBILE_AFTERIMAGE_CAPTURE_BLUR_MULTIPLIER : 1;
+  }
+
+  function getSide3AfterimageDrawBlurMultiplier() {
+    return isMobilePerformanceProfile() ? SIDE3_MOBILE_AFTERIMAGE_DRAW_BLUR_MULTIPLIER : 1;
+  }
+
+  function getSide3AfterimageAlphaScale() {
+    return isMobilePerformanceProfile() ? SIDE3_MOBILE_AFTERIMAGE_ALPHA_SCALE : 1;
   }
 
   function getSide3MaxNotesPerTick() {
