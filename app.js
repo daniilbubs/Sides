@@ -224,6 +224,10 @@ const SIDE4_ROOM_MEMORY_DURATION = 42000;
 const SIDE4_ROOM_MEMORY_CAPTURE_INTERVAL_MS = 320;
 const SIDE4_ROOM_MEMORY_MAX_FRAMES = 132;
 const SIDE4_ROOM_MEMORY_SCALE = 0.72;
+const SIDE4_MOBILE_ROOM_MEMORY_MAX_FRAMES = 72;
+const SIDE4_MOBILE_ROOM_MEMORY_CAPTURE_INTERVAL_MS = 620;
+const SIDE4_MOBILE_ROOM_MEMORY_SCALE = 0.46;
+const SIDE4_MOBILE_TABLET_ROOM_MEMORY_SCALE = 0.52;
 const SIDE4_ROOM_SNAPSHOT_MIN_INTERVAL = 5200;
 const SIDE4_ROOM_SNAPSHOT_MAX_INTERVAL = 11800;
 const SIDE4_ROOM_SNAPSHOT_MIN_DURATION = 6200;
@@ -254,6 +258,11 @@ const MASK_EDGE_SOFTNESS = 1.6;
 const MAX_RENDER_WIDTH = 640;
 const MAX_RENDER_HEIGHT = 960;
 const MAX_DEVICE_PIXEL_RATIO = 1.5;
+const MOBILE_MAX_RENDER_WIDTH = 560;
+const MOBILE_MAX_RENDER_HEIGHT = 840;
+const MOBILE_TABLET_MAX_RENDER_WIDTH = 600;
+const MOBILE_TABLET_MAX_RENDER_HEIGHT = 900;
+const MOBILE_SEGMENTATION_INTERVAL_MS = 48;
 const MASK_SAMPLE_SIZE = 88;
 
 // -----------------------------------------------------------------------------
@@ -312,6 +321,7 @@ let poseDetector = null;
 let poseLoadFailed = false;
 let poseStartedAt = 0;
 let lastPoseSentAt = 0;
+let lastSegmentationSentAt = 0;
 let latestPoseLandmarks = null;
 let latestPoseScreenLandmarks = null;
 let previousPoseScreenLandmarks = null;
@@ -2448,11 +2458,22 @@ function enterSelectedSide() {
   route();
 }
 
+function stopExternalSideModules(activeSide) {
+  if (activeSide !== 2 && window.Side2Fluid && typeof window.Side2Fluid.stop === "function") {
+    window.Side2Fluid.stop();
+  }
+  if (activeSide !== 3 && window.Side3Light && typeof window.Side3Light.stop === "function") {
+    window.Side3Light.stop();
+  }
+}
+
 function startSideOne() {
+  stopExternalSideModules(1);
   return startInstallation();
 }
 
 function startSideTwo() {
+  stopExternalSideModules(2);
   if (!window.Side2Fluid || typeof window.Side2Fluid.start !== "function") {
     return startSideOne();
   }
@@ -2496,6 +2517,7 @@ function startSideTwo() {
 }
 
 function startSideThree() {
+  stopExternalSideModules(3);
   if (!window.Side3Light || typeof window.Side3Light.start !== "function") {
     return startSideOne();
   }
@@ -2539,6 +2561,7 @@ function startSideThree() {
 }
 
 function startSideFour() {
+  stopExternalSideModules(4);
   return startSideOne();
 }
 
@@ -3373,8 +3396,11 @@ function updateSide4StructuralCorruption(time, breakup, corruptionState) {
 
   const baseDepth = Math.pow(clamp(breakup, 0, 1), 0.96);
   const depth = clamp(baseDepth + corruptionState.burst * 0.22 + corruptionState.lockup * 0.32, 0, 1);
-  const interval = lerp(0.24, 0.018, Math.pow(depth, 0.98)) * lerp(1, 0.42, corruptionState.lockup);
-  const maxBursts = corruptionState.lockup > 0.05 ? 8 : depth > 0.8 ? 6 : depth > 0.48 ? 3 : 1;
+  const interval = lerp(0.24, 0.018, Math.pow(depth, 0.98))
+    * lerp(1, 0.42, corruptionState.lockup)
+    * getSide4MobileAudioIntervalScale();
+  const baseMaxBursts = corruptionState.lockup > 0.05 ? 8 : depth > 0.8 ? 6 : depth > 0.48 ? 3 : 1;
+  const maxBursts = Math.max(1, Math.round(baseMaxBursts * getSide4MobileAudioBurstScale()));
   let spawned = 0;
 
   if (!side4NextStructuralGrainAt || side4NextStructuralGrainAt < time - 0.5) {
@@ -3383,11 +3409,12 @@ function updateSide4StructuralCorruption(time, breakup, corruptionState) {
 
   while (time >= side4NextStructuralGrainAt && spawned < maxBursts) {
     const serial = side4StructuralGrainSerial;
-    const repeatCount = corruptionState.lockup > 0.05
+    let repeatCount = corruptionState.lockup > 0.05
       ? 6 + Math.floor(Math.pow(depth, 1.05) * lerp(3, 9, hash1(serial, 2203)))
       : corruptionState.stutter
       ? 3 + Math.floor(Math.pow(depth, 1.18) * lerp(2, 8, hash1(serial, 2203)))
       : 1 + Math.floor(Math.pow(depth, 1.46) * lerp(0, 5, hash1(serial, 2203)));
+    repeatCount = Math.max(1, Math.round(repeatCount * getSide4MobileAudioRepeatScale()));
     const jumpSpread = lerp(0.08, 3.2, Math.pow(depth, 1.02)) * lerp(1, 1.5, corruptionState.burst);
     const baseOffset = wrapAudioOffset(
       lerp(side4SoundtrackPlaybackPosition, corruptionState.lockupOffset, corruptionState.lockup)
@@ -3404,6 +3431,18 @@ function updateSide4StructuralCorruption(time, breakup, corruptionState) {
     spawned += 1;
     side4NextStructuralGrainAt += interval * lerp(0.16, 0.92, hash1(side4StructuralGrainSerial, 2205));
   }
+}
+
+function getSide4MobileAudioIntervalScale() {
+  return isMobilePerformanceProfile() ? 1.22 : 1;
+}
+
+function getSide4MobileAudioBurstScale() {
+  return isMobilePerformanceProfile() ? 0.68 : 1;
+}
+
+function getSide4MobileAudioRepeatScale() {
+  return isMobilePerformanceProfile() ? 0.62 : 1;
 }
 
 function spawnSide4MicroLoopGrain(time, depth, baseOffset, serial, repeatIndex, lockup = 0) {
@@ -3708,8 +3747,13 @@ async function runSegmentationLoop() {
   while (isRunning) {
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       try {
-        await segmenter.send({ image: video });
-        await maybeSendPoseFrame(performance.now());
+        const now = performance.now();
+        const segmentationInterval = getMainSegmentationInterval();
+        if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
+          lastSegmentationSentAt = now;
+          await segmenter.send({ image: video });
+          await maybeSendPoseFrame(now);
+        }
       } catch (error) {
         console.error(error);
         await wait(120);
@@ -3836,6 +3880,7 @@ function resetTransformation() {
   latestProgress = 0;
   manualStage = null;
   trailFragments.length = 0;
+  lastSegmentationSentAt = 0;
   previousPoseScreenLandmarks = null;
   resetSide4TemporalMemory();
 }
@@ -3932,9 +3977,34 @@ function releaseSide4RoomMemoryFrames() {
   }
 }
 
+function resizeSide4RoomMemoryCanvases(width, height) {
+  const frameLimit = getSide4RoomMemoryFrameLimit();
+  const scale = getSide4RoomMemoryScale();
+  const memoryWidth = Math.max(1, Math.round(width * scale));
+  const memoryHeight = Math.max(1, Math.round(height * scale));
+
+  side4RoomMemoryFrames.length = 0;
+  side4RoomMemoryFramePool.length = 0;
+
+  side4RoomMemoryCanvases.forEach((memoryCanvas, index) => {
+    if (index < frameLimit) {
+      memoryCanvas.width = memoryWidth;
+      memoryCanvas.height = memoryHeight;
+      side4RoomMemoryFramePool.push({
+        canvas: memoryCanvas,
+        ctx: side4RoomMemoryContexts[index],
+        time: 0
+      });
+    } else {
+      memoryCanvas.width = 1;
+      memoryCanvas.height = 1;
+    }
+  });
+}
+
 function recordSide4RoomMemoryFrame(now) {
   if (!video.videoWidth || !video.videoHeight || !canvas.width || !canvas.height) return;
-  if (side4RoomMemoryFrames.length > 0 && now - side4LastRoomMemoryRecordAt < SIDE4_ROOM_MEMORY_CAPTURE_INTERVAL_MS) return;
+  if (side4RoomMemoryFrames.length > 0 && now - side4LastRoomMemoryRecordAt < getSide4RoomMemoryCaptureInterval()) return;
 
   const frame = side4RoomMemoryFramePool.length
     ? side4RoomMemoryFramePool.pop()
@@ -6293,6 +6363,50 @@ function handleKeyboard(event) {
 // CANVAS HELPERS
 // -----------------------------------------------------------------------------
 
+function isMobilePerformanceProfile() {
+  const userAgent = navigator.userAgent || "";
+  const iPadOS = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+  const touchDevice = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  const smallTouchScreen = touchDevice && Math.min(screen.width || window.innerWidth || 0, screen.height || window.innerHeight || 0) <= 820;
+  return iPadOS || /Android|iPhone|iPad|iPod/i.test(userAgent) || smallTouchScreen;
+}
+
+function isTabletPerformanceProfile() {
+  if (!isMobilePerformanceProfile()) return false;
+  return Math.min(window.innerWidth || 0, window.innerHeight || 0) >= 700;
+}
+
+function shouldUseSide4MobilePerformanceProfile() {
+  return selectedSideNumber === 4 && isMobilePerformanceProfile();
+}
+
+function getMainMaxRenderWidth() {
+  if (!shouldUseSide4MobilePerformanceProfile()) return MAX_RENDER_WIDTH;
+  return isTabletPerformanceProfile() ? MOBILE_TABLET_MAX_RENDER_WIDTH : MOBILE_MAX_RENDER_WIDTH;
+}
+
+function getMainMaxRenderHeight() {
+  if (!shouldUseSide4MobilePerformanceProfile()) return MAX_RENDER_HEIGHT;
+  return isTabletPerformanceProfile() ? MOBILE_TABLET_MAX_RENDER_HEIGHT : MOBILE_MAX_RENDER_HEIGHT;
+}
+
+function getMainSegmentationInterval() {
+  return shouldUseSide4MobilePerformanceProfile() ? MOBILE_SEGMENTATION_INTERVAL_MS : 0;
+}
+
+function getSide4RoomMemoryFrameLimit() {
+  return isMobilePerformanceProfile() ? SIDE4_MOBILE_ROOM_MEMORY_MAX_FRAMES : SIDE4_ROOM_MEMORY_MAX_FRAMES;
+}
+
+function getSide4RoomMemoryCaptureInterval() {
+  return isMobilePerformanceProfile() ? SIDE4_MOBILE_ROOM_MEMORY_CAPTURE_INTERVAL_MS : SIDE4_ROOM_MEMORY_CAPTURE_INTERVAL_MS;
+}
+
+function getSide4RoomMemoryScale() {
+  if (!isMobilePerformanceProfile()) return SIDE4_ROOM_MEMORY_SCALE;
+  return isTabletPerformanceProfile() ? SIDE4_MOBILE_TABLET_ROOM_MEMORY_SCALE : SIDE4_MOBILE_ROOM_MEMORY_SCALE;
+}
+
 function resizeRenderer() {
   const cssWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
   const cssHeight = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
@@ -6302,8 +6416,8 @@ function resizeRenderer() {
     Math.min(
       window.devicePixelRatio || 1,
       MAX_DEVICE_PIXEL_RATIO,
-      MAX_RENDER_WIDTH / cssWidth,
-      MAX_RENDER_HEIGHT / cssHeight
+      getMainMaxRenderWidth() / cssWidth,
+      getMainMaxRenderHeight() / cssHeight
     )
   );
 
@@ -6324,13 +6438,9 @@ function resizeRenderer() {
     memoryCanvas.width = width;
     memoryCanvas.height = height;
   });
-  side4RoomMemoryCanvases.forEach((memoryCanvas) => {
-    memoryCanvas.width = Math.max(1, Math.round(width * SIDE4_ROOM_MEMORY_SCALE));
-    memoryCanvas.height = Math.max(1, Math.round(height * SIDE4_ROOM_MEMORY_SCALE));
-  });
+  resizeSide4RoomMemoryCanvases(width, height);
   frameMemoryFilled = 0;
   frameMemoryIndex = 0;
-  releaseSide4RoomMemoryFrames();
   side4LastRoomMemoryRecordAt = 0;
 
   ctx.imageSmoothingEnabled = true;

@@ -15,6 +15,11 @@
   const SIDE2_MAX_RENDER_WIDTH = 640;
   const SIDE2_MAX_RENDER_HEIGHT = 960;
   const SIDE2_MAX_DEVICE_PIXEL_RATIO = 1.5;
+  const SIDE2_MOBILE_MAX_RENDER_WIDTH = 560;
+  const SIDE2_MOBILE_MAX_RENDER_HEIGHT = 840;
+  const SIDE2_MOBILE_TABLET_MAX_RENDER_WIDTH = 600;
+  const SIDE2_MOBILE_TABLET_MAX_RENDER_HEIGHT = 900;
+  const SIDE2_MOBILE_SEGMENTATION_INTERVAL_MS = 48;
   const SIDE2_MASK_SAMPLE_SIZE = 96;
   const SIDE2_BODY_PRESENT_MIN_COVERAGE = 0.012;
   const SIDE2_BODY_MISSING_RESET_AFTER_MS = 2400;
@@ -33,6 +38,8 @@
   const SIDE2_LENS_MASK_BLUR = 18;
   const SIDE2_LENS_MAX_WIDTH = 300;
   const SIDE2_LENS_MAX_HEIGHT = 450;
+  const SIDE2_LENS_MOBILE_MAX_WIDTH = 210;
+  const SIDE2_LENS_MOBILE_MAX_HEIGHT = 315;
   const SIDE2_LENS_STAGE_COUNTS = [0, 220, 650, 1180, 1650, 2200];
   const SIDE2_LENS_BODY_COUNT = 1500;
   const SIDE2_LENS_FLOATING_COUNT = 700;
@@ -83,6 +90,8 @@
   const SIDE2_LENS_LOW_FPS_THRESHOLD = 31;
   const SIDE2_LENS_HIGH_FPS_THRESHOLD = 42;
   const SIDE2_LENS_MIN_QUALITY_SCALE = 0.48;
+  const SIDE2_LENS_MOBILE_INITIAL_QUALITY = 0.56;
+  const SIDE2_LENS_MOBILE_MIN_QUALITY_SCALE = 0.34;
   const SIDE2_LENS_CREATE_BATCH_SIZE = 140;
   const SIDE2_LENS_SOURCE_UPDATE_INTERVAL_MS = 78;
   const SIDE2_LENS_SOURCE_UPDATE_GROUPS = 6;
@@ -189,6 +198,7 @@
   let poseDetector = null;
   let running = false;
   let segmenting = false;
+  let lastSegmentationSentAt = 0;
   let facingMode = "environment";
   let lastPoseSentAt = 0;
   let latestPosePoints = null;
@@ -243,7 +253,7 @@
   let side2LensOutputPixels = null;
   let side2LensOutputWidth = 0;
   let side2LensOutputHeight = 0;
-  let side2LensQuality = 0.88;
+  let side2LensQuality = getSide2InitialLensQuality();
   let side2LensPerfFrameCount = 0;
   let side2LensPerfWindowStartedAt = 0;
   let side2MeasuredLensFps = 0;
@@ -298,6 +308,8 @@
 
   async function start(options = {}) {
     try {
+      if (running || stream) stop();
+
       video = document.getElementById("camera");
       canvas = document.getElementById("renderCanvas");
       ctx = canvas.getContext("2d", { alpha: false });
@@ -328,6 +340,49 @@
         throw error;
       }
     }
+  }
+
+  function stop() {
+    running = false;
+    window.removeEventListener("resize", resizeRenderer);
+    window.removeEventListener("orientationchange", handleOrientationChange);
+    document.removeEventListener("keydown", handleKeyboard);
+
+    const activeStream = stream;
+    if (activeStream) {
+      activeStream.getTracks().forEach((track) => track.stop());
+      if (video && video.srcObject === activeStream) video.srcObject = null;
+    }
+    stream = null;
+    lastSegmentationSentAt = 0;
+    lastPoseSentAt = 0;
+
+    if (segmenter && typeof segmenter.close === "function") {
+      try {
+        segmenter.close();
+      } catch (error) {
+        console.warn("Side 2 segmentation cleanup skipped.", error);
+      }
+    }
+    segmenter = null;
+
+    if (poseDetector && typeof poseDetector.close === "function") {
+      try {
+        poseDetector.close();
+      } catch (error) {
+        console.warn("Side 2 pose cleanup skipped.", error);
+      }
+    }
+    poseDetector = null;
+
+    if (audioContext && audioNodes && audioNodes.master) {
+      const time = audioContext.currentTime;
+      audioNodes.master.gain.setTargetAtTime(0, time, 0.08);
+      if (audioContext.state === "running") {
+        audioContext.suspend().catch(() => {});
+      }
+    }
+    audioStarted = false;
   }
 
   function primeAudio() {
@@ -512,8 +567,13 @@
     while (running) {
       if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         try {
-          await segmenter.send({ image: video });
-          await maybeSendPoseFrame(performance.now());
+          const now = performance.now();
+          const segmentationInterval = getSide2SegmentationInterval();
+          if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
+            lastSegmentationSentAt = now;
+            await segmenter.send({ image: video });
+            await maybeSendPoseFrame(now);
+          }
         } catch (error) {
           console.error(error);
           await wait(120);
@@ -541,6 +601,7 @@
   }
 
   function handleSegmentationResults(results) {
+    if (!running) return;
     const now = performance.now();
     resizeRenderer();
     prepareMask(results.segmentationMask, now);
@@ -549,6 +610,7 @@
   }
 
   function handlePoseResults(results) {
+    if (!running) return;
     const landmarks = results.poseLandmarks || [];
     latestPosePoints = landmarks.map((landmark, index) => poseLandmarkToCanvasPoint(landmark, index));
     latestVisiblePoseCount = latestPosePoints.filter(isVisiblePosePoint).length;
@@ -638,7 +700,7 @@
     lastVisualFrameAt = 0;
     latestPoseVelocity = { x: 0, y: 0 };
     side2Lenses = [];
-    side2LensQuality = 0.88;
+    side2LensQuality = getSide2InitialLensQuality();
     side2LensInteractionCursor = 0;
     side2LensNextInteractionAt = 0;
     side2DrawableLensCount = 0;
@@ -726,9 +788,10 @@
       side2Lenses.length = SIDE2_LENS_MAX_COUNT;
     }
 
-    const prewarmCount = Math.min(SIDE2_LENS_MAX_COUNT, targetCount + SIDE2_LENS_CREATE_BATCH_SIZE);
+    const createBatchSize = getSide2LensCreateBatchSize();
+    const prewarmCount = Math.min(SIDE2_LENS_MAX_COUNT, targetCount + createBatchSize);
     const desiredPoolCount = prewarmCount > side2Lenses.length
-      ? Math.min(prewarmCount, side2Lenses.length + SIDE2_LENS_CREATE_BATCH_SIZE)
+      ? Math.min(prewarmCount, side2Lenses.length + createBatchSize)
       : side2Lenses.length;
 
     while (side2Lenses.length < desiredPoolCount) {
@@ -2856,8 +2919,8 @@
 
     const scale = Math.min(
       1,
-      (SIDE2_LENS_MAX_WIDTH * side2LensQuality) / Math.max(1, bounds.width),
-      (SIDE2_LENS_MAX_HEIGHT * side2LensQuality) / Math.max(1, bounds.height)
+      (getSide2LensRenderMaxWidth() * side2LensQuality) / Math.max(1, bounds.width),
+      (getSide2LensRenderMaxHeight() * side2LensQuality) / Math.max(1, bounds.height)
     );
     const localWidth = Math.max(2, Math.round(bounds.width * scale));
     const localHeight = Math.max(2, Math.round(bounds.height * scale));
@@ -3322,7 +3385,7 @@
     side2MeasuredLensFps = (side2LensPerfFrameCount * 1000) / Math.max(1, elapsed);
 
     if (side2MeasuredLensFps < SIDE2_LENS_LOW_FPS_THRESHOLD || side2MeasuredLensMs > 13) {
-      side2LensQuality = Math.max(SIDE2_LENS_MIN_QUALITY_SCALE, side2LensQuality - (side2MeasuredLensMs > 20 ? 0.1 : 0.065));
+      side2LensQuality = Math.max(getSide2MinLensQuality(), side2LensQuality - (side2MeasuredLensMs > 20 ? 0.1 : 0.065));
     } else if (side2MeasuredLensFps > SIDE2_LENS_HIGH_FPS_THRESHOLD && side2MeasuredLensMs < 8.5) {
       side2LensQuality = Math.min(0.94, side2LensQuality + 0.025);
     }
@@ -4671,6 +4734,53 @@
     window.setTimeout(resizeRenderer, 250);
   }
 
+  function isMobilePerformanceProfile() {
+    const userAgent = navigator.userAgent || "";
+    const iPadOS = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    const touchDevice = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    const smallTouchScreen = touchDevice && Math.min(screen.width || window.innerWidth || 0, screen.height || window.innerHeight || 0) <= 820;
+    return iPadOS || /Android|iPhone|iPad|iPod/i.test(userAgent) || smallTouchScreen;
+  }
+
+  function isTabletPerformanceProfile() {
+    if (!isMobilePerformanceProfile()) return false;
+    return Math.min(window.innerWidth || 0, window.innerHeight || 0) >= 700;
+  }
+
+  function getSide2MaxRenderWidth() {
+    if (!isMobilePerformanceProfile()) return SIDE2_MAX_RENDER_WIDTH;
+    return isTabletPerformanceProfile() ? SIDE2_MOBILE_TABLET_MAX_RENDER_WIDTH : SIDE2_MOBILE_MAX_RENDER_WIDTH;
+  }
+
+  function getSide2MaxRenderHeight() {
+    if (!isMobilePerformanceProfile()) return SIDE2_MAX_RENDER_HEIGHT;
+    return isTabletPerformanceProfile() ? SIDE2_MOBILE_TABLET_MAX_RENDER_HEIGHT : SIDE2_MOBILE_MAX_RENDER_HEIGHT;
+  }
+
+  function getSide2SegmentationInterval() {
+    return isMobilePerformanceProfile() ? SIDE2_MOBILE_SEGMENTATION_INTERVAL_MS : 0;
+  }
+
+  function getSide2InitialLensQuality() {
+    return isMobilePerformanceProfile() ? SIDE2_LENS_MOBILE_INITIAL_QUALITY : 0.88;
+  }
+
+  function getSide2MinLensQuality() {
+    return isMobilePerformanceProfile() ? SIDE2_LENS_MOBILE_MIN_QUALITY_SCALE : SIDE2_LENS_MIN_QUALITY_SCALE;
+  }
+
+  function getSide2LensRenderMaxWidth() {
+    return isMobilePerformanceProfile() ? SIDE2_LENS_MOBILE_MAX_WIDTH : SIDE2_LENS_MAX_WIDTH;
+  }
+
+  function getSide2LensRenderMaxHeight() {
+    return isMobilePerformanceProfile() ? SIDE2_LENS_MOBILE_MAX_HEIGHT : SIDE2_LENS_MAX_HEIGHT;
+  }
+
+  function getSide2LensCreateBatchSize() {
+    return isMobilePerformanceProfile() ? Math.max(48, Math.round(SIDE2_LENS_CREATE_BATCH_SIZE * 0.52)) : SIDE2_LENS_CREATE_BATCH_SIZE;
+  }
+
   function resizeRenderer() {
     if (!canvas) return;
 
@@ -4679,8 +4789,8 @@
     const pixelRatio = Math.min(window.devicePixelRatio || 1, SIDE2_MAX_DEVICE_PIXEL_RATIO);
     const scale = Math.min(
       1,
-      SIDE2_MAX_RENDER_WIDTH / Math.max(1, viewportWidth * pixelRatio),
-      SIDE2_MAX_RENDER_HEIGHT / Math.max(1, viewportHeight * pixelRatio)
+      getSide2MaxRenderWidth() / Math.max(1, viewportWidth * pixelRatio),
+      getSide2MaxRenderHeight() / Math.max(1, viewportHeight * pixelRatio)
     );
     const width = Math.max(1, Math.round(viewportWidth * pixelRatio * scale));
     const height = Math.max(1, Math.round(viewportHeight * pixelRatio * scale));
@@ -4703,7 +4813,7 @@
     stableMaskBounds = null;
     lastStableMaskSeenAt = 0;
     side2Lenses = [];
-    side2LensQuality = 0.88;
+    side2LensQuality = getSide2InitialLensQuality();
     side2LensOutputPixels = null;
     side2LensOutputWidth = 0;
     side2LensOutputHeight = 0;
@@ -4794,6 +4904,7 @@
 
   window.Side2Fluid = {
     start,
-    primeAudio
+    primeAudio,
+    stop
   };
 }());

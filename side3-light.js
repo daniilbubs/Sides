@@ -16,6 +16,13 @@
   const SIDE3_MAX_RENDER_WIDTH = 640;
   const SIDE3_MAX_RENDER_HEIGHT = 960;
   const SIDE3_MAX_DEVICE_PIXEL_RATIO = 1.5;
+  const SIDE3_MOBILE_MAX_RENDER_WIDTH = 560;
+  const SIDE3_MOBILE_MAX_RENDER_HEIGHT = 840;
+  const SIDE3_MOBILE_TABLET_MAX_RENDER_WIDTH = 600;
+  const SIDE3_MOBILE_TABLET_MAX_RENDER_HEIGHT = 900;
+  const SIDE3_MOBILE_SEGMENTATION_INTERVAL_MS = 48;
+  const SIDE3_MOBILE_AFTERIMAGE_SCALE = 0.58;
+  const SIDE3_MOBILE_TABLET_AFTERIMAGE_SCALE = 0.66;
   const SIDE3_POSE_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js";
   const SIDE3_POSE_FRAME_INTERVAL_MS = 95;
   const SIDE3_LANDMARK_CONFIDENCE = 0.55;
@@ -67,6 +74,7 @@
   const SIDE3_MUSIC_BOX_BASE_STEP_SECONDS = 0.285;
   const SIDE3_MUSIC_BOX_LOOKAHEAD_SECONDS = 0.14;
   const SIDE3_MUSIC_BOX_MAX_NOTES_PER_TICK = 28;
+  const SIDE3_MUSIC_BOX_MOBILE_MAX_NOTES_PER_TICK = 20;
   const SIDE3_MUSIC_BOX_NOTE_GAIN = 0.09;
   const SIDE3_MUSIC_BOX_NOTE_DECAY = 0.92;
   const SIDE3_MUSIC_BOX_MIN_NOTE_DECAY = 0.08;
@@ -108,6 +116,7 @@
   let poseDetector = null;
   let running = false;
   let segmenting = false;
+  let lastSegmentationSentAt = 0;
   let facingMode = "environment";
   let bodyIsPresent = false;
   let lastBodySeenAt = 0;
@@ -171,6 +180,8 @@
 
   async function start(options = {}) {
     try {
+      if (running || stream) stop();
+
       video = document.getElementById("camera");
       canvas = document.getElementById("renderCanvas");
       ctx = canvas.getContext("2d", { alpha: false });
@@ -201,6 +212,49 @@
         throw error;
       }
     }
+  }
+
+  function stop() {
+    running = false;
+    window.removeEventListener("resize", resizeRenderer);
+    window.removeEventListener("orientationchange", handleOrientationChange);
+    document.removeEventListener("keydown", handleKeyboard);
+
+    const activeStream = stream;
+    if (activeStream) {
+      activeStream.getTracks().forEach((track) => track.stop());
+      if (video && video.srcObject === activeStream) video.srcObject = null;
+    }
+    stream = null;
+    lastSegmentationSentAt = 0;
+    lastPoseSentAt = 0;
+
+    if (segmenter && typeof segmenter.close === "function") {
+      try {
+        segmenter.close();
+      } catch (error) {
+        console.warn("Side 3 segmentation cleanup skipped.", error);
+      }
+    }
+    segmenter = null;
+
+    if (poseDetector && typeof poseDetector.close === "function") {
+      try {
+        poseDetector.close();
+      } catch (error) {
+        console.warn("Side 3 pose cleanup skipped.", error);
+      }
+    }
+    poseDetector = null;
+
+    if (audioContext && audioNodes && audioNodes.master) {
+      const time = audioContext.currentTime;
+      audioNodes.master.gain.setTargetAtTime(0, time, 0.08);
+      if (audioContext.state === "running") {
+        audioContext.suspend().catch(() => {});
+      }
+    }
+    audioStarted = false;
   }
 
   function primeAudio() {
@@ -354,8 +408,13 @@
     while (running) {
       if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         try {
-          await segmenter.send({ image: video });
-          await maybeSendPoseFrame(performance.now());
+          const now = performance.now();
+          const segmentationInterval = getSide3SegmentationInterval();
+          if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
+            lastSegmentationSentAt = now;
+            await segmenter.send({ image: video });
+            await maybeSendPoseFrame(now);
+          }
         } catch (error) {
           console.error(error);
           await wait(120);
@@ -383,6 +442,7 @@
   }
 
   function handleSegmentationResults(results) {
+    if (!running) return;
     const now = performance.now();
     resizeRenderer();
     prepareMask(results.segmentationMask, now);
@@ -391,6 +451,7 @@
   }
 
   function handlePoseResults(results) {
+    if (!running) return;
     const landmarks = results.poseLandmarks || [];
     latestPosePoints = landmarks.map((landmark, index) => poseLandmarkToCanvasPoint(landmark, index));
   }
@@ -1066,10 +1127,13 @@
     const echoPower = smoothstep(0.2, 1, progress);
     const targetCanvas = afterimageCanvases[afterimagePoolIndex % afterimageCanvases.length];
     const targetCtx = afterimageContexts[afterimagePoolIndex % afterimageContexts.length];
+    const afterimageScaleX = targetCanvas.width / Math.max(1, canvas.width);
+    const afterimageScaleY = targetCanvas.height / Math.max(1, canvas.height);
     afterimagePoolIndex += 1;
 
-    targetCtx.save();
     targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+    targetCtx.save();
+    targetCtx.setTransform(afterimageScaleX, 0, 0, afterimageScaleY, 0, 0);
     targetCtx.globalAlpha = 1;
     targetCtx.globalCompositeOperation = "source-over";
     targetCtx.filter = "none";
@@ -1077,7 +1141,7 @@
     targetCtx.drawImage(stableMaskCanvas, 0, 0);
     targetCtx.filter = "none";
     targetCtx.globalCompositeOperation = "source-in";
-    const source = stableMaskBounds || currentMaskBounds || { minX: 0, minY: 0, maxX: targetCanvas.width, maxY: targetCanvas.height };
+    const source = stableMaskBounds || currentMaskBounds || { minX: 0, minY: 0, maxX: canvas.width, maxY: canvas.height };
     const face = getFaceLightAnchor(source);
     const bodyScale = Math.max(1, source.maxY - source.minY);
     const bodyWidth = Math.max(1, source.maxX - source.minX);
@@ -1088,7 +1152,7 @@
     gradient.addColorStop(0.28, "rgba(255,248,220," + (0.38 + echoPower * 0.34).toFixed(4) + ")");
     gradient.addColorStop(1, "rgba(255,226,166," + (0.04 + echoPower * 0.08).toFixed(4) + ")");
     targetCtx.fillStyle = gradient;
-    targetCtx.fillRect(0, 0, targetCanvas.width, targetCanvas.height);
+    targetCtx.fillRect(0, 0, canvas.width, canvas.height);
     targetCtx.globalCompositeOperation = "source-atop";
     targetCtx.globalAlpha = 0.35 + echoPower * 0.34;
     drawVolumetricCore(
@@ -1157,7 +1221,7 @@
       const fade = smoothstep(0, 0.12, age) * (1 - smoothstep(0.68, 1, age));
       ctx.globalAlpha = echo.alpha * fade * (0.5 + echoPower * 0.68);
       ctx.filter = "blur(" + (echo.blur * smoothstep(0.12, 1, age)).toFixed(2) + "px)";
-      ctx.drawImage(echo.canvas, echo.driftX * age, echo.driftY * age);
+      ctx.drawImage(echo.canvas, echo.driftX * age, echo.driftY * age, canvas.width, canvas.height);
     }
 
     ctx.filter = "none";
@@ -1689,9 +1753,10 @@
     let scheduled = 0;
     const lookahead = time + SIDE3_MUSIC_BOX_LOOKAHEAD_SECONDS;
     const stepSeconds = Math.max(0.018, SIDE3_MUSIC_BOX_BASE_STEP_SECONDS / Math.max(0.001, playbackRate));
+    const maxNotesPerTick = getSide3MaxNotesPerTick();
     nextMusicBoxNoteTime = Math.min(nextMusicBoxNoteTime, time + stepSeconds);
 
-    while (nextMusicBoxNoteTime < lookahead && scheduled < SIDE3_MUSIC_BOX_MAX_NOTES_PER_TICK) {
+    while (nextMusicBoxNoteTime < lookahead && scheduled < maxNotesPerTick) {
       const note = SIDE3_MUSIC_BOX_MELODY[musicBoxNoteIndex % SIDE3_MUSIC_BOX_MELODY.length];
 
       if (Number.isFinite(note)) {
@@ -1703,7 +1768,7 @@
       scheduled += 1;
     }
 
-    if (scheduled >= SIDE3_MUSIC_BOX_MAX_NOTES_PER_TICK && nextMusicBoxNoteTime < time) {
+    if (scheduled >= maxNotesPerTick && nextMusicBoxNoteTime < time) {
       nextMusicBoxNoteTime = time + stepSeconds;
     }
   }
@@ -1863,6 +1928,42 @@
     window.setTimeout(resizeRenderer, 250);
   }
 
+  function isMobilePerformanceProfile() {
+    const userAgent = navigator.userAgent || "";
+    const iPadOS = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    const touchDevice = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    const smallTouchScreen = touchDevice && Math.min(screen.width || window.innerWidth || 0, screen.height || window.innerHeight || 0) <= 820;
+    return iPadOS || /Android|iPhone|iPad|iPod/i.test(userAgent) || smallTouchScreen;
+  }
+
+  function isTabletPerformanceProfile() {
+    if (!isMobilePerformanceProfile()) return false;
+    return Math.min(window.innerWidth || 0, window.innerHeight || 0) >= 700;
+  }
+
+  function getSide3MaxRenderWidth() {
+    if (!isMobilePerformanceProfile()) return SIDE3_MAX_RENDER_WIDTH;
+    return isTabletPerformanceProfile() ? SIDE3_MOBILE_TABLET_MAX_RENDER_WIDTH : SIDE3_MOBILE_MAX_RENDER_WIDTH;
+  }
+
+  function getSide3MaxRenderHeight() {
+    if (!isMobilePerformanceProfile()) return SIDE3_MAX_RENDER_HEIGHT;
+    return isTabletPerformanceProfile() ? SIDE3_MOBILE_TABLET_MAX_RENDER_HEIGHT : SIDE3_MOBILE_MAX_RENDER_HEIGHT;
+  }
+
+  function getSide3SegmentationInterval() {
+    return isMobilePerformanceProfile() ? SIDE3_MOBILE_SEGMENTATION_INTERVAL_MS : 0;
+  }
+
+  function getSide3AfterimageScale() {
+    if (!isMobilePerformanceProfile()) return 1;
+    return isTabletPerformanceProfile() ? SIDE3_MOBILE_TABLET_AFTERIMAGE_SCALE : SIDE3_MOBILE_AFTERIMAGE_SCALE;
+  }
+
+  function getSide3MaxNotesPerTick() {
+    return isMobilePerformanceProfile() ? SIDE3_MUSIC_BOX_MOBILE_MAX_NOTES_PER_TICK : SIDE3_MUSIC_BOX_MAX_NOTES_PER_TICK;
+  }
+
   function resizeRenderer() {
     if (!canvas) return;
 
@@ -1871,17 +1972,22 @@
     const pixelRatio = Math.min(window.devicePixelRatio || 1, SIDE3_MAX_DEVICE_PIXEL_RATIO);
     const scale = Math.min(
       1,
-      SIDE3_MAX_RENDER_WIDTH / Math.max(1, viewportWidth * pixelRatio),
-      SIDE3_MAX_RENDER_HEIGHT / Math.max(1, viewportHeight * pixelRatio)
+      getSide3MaxRenderWidth() / Math.max(1, viewportWidth * pixelRatio),
+      getSide3MaxRenderHeight() / Math.max(1, viewportHeight * pixelRatio)
     );
     const width = Math.max(1, Math.round(viewportWidth * pixelRatio * scale));
     const height = Math.max(1, Math.round(viewportHeight * pixelRatio * scale));
 
     if (canvas.width === width && canvas.height === height) return;
 
-    [canvas, currentCanvas, maskCanvas, stableMaskCanvas, stableMaskBufferCanvas, shellCanvas, lightCanvas, haloCanvas, diffusionCanvas, ...afterimageCanvases].forEach((target) => {
+    [canvas, currentCanvas, maskCanvas, stableMaskCanvas, stableMaskBufferCanvas, shellCanvas, lightCanvas, haloCanvas, diffusionCanvas].forEach((target) => {
       target.width = width;
       target.height = height;
+    });
+    const afterimageScale = getSide3AfterimageScale();
+    afterimageCanvases.forEach((target) => {
+      target.width = Math.max(1, Math.round(width * afterimageScale));
+      target.height = Math.max(1, Math.round(height * afterimageScale));
     });
 
     [ctx, currentCtx, maskCtx, stableMaskCtx, stableMaskBufferCtx, shellCtx, lightCtx, haloCtx, diffusionCtx, ...afterimageContexts].forEach((targetCtx) => {
@@ -1993,6 +2099,7 @@
 
   window.Side3Light = {
     start,
-    primeAudio
+    primeAudio,
+    stop
   };
 }());
