@@ -1,0 +1,400 @@
+:root {
+  color-scheme: light;
+  --paper: #f2f2f2;
+  --paper-soft: #fafafa;
+  --ink: #101010;
+  --ink-soft: #3c3c3c;
+  --shadow: rgba(0, 0, 0, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button:focus-visible {
+  outline: 0;
+}
+
+.installation {
+  position: fixed;
+  inset: 0;
+  min-width: 100vw;
+  min-height: 100svh;
+  background: var(--paper);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+#camera {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#renderCanvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100vw;
+  height: 100svh;
+  background: var(--paper);
+}
+
+.start-panel {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+  background: var(--paper);
+  text-align: center;
+  transition: opacity 1200ms ease, visibility 1200ms ease;
+  z-index: 4;
+  overflow: hidden;
+}
+
+.start-panel.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.start-panel.is-revealing-camera {
+  background: transparent;
+}
+
+.start-panel.is-revealing-camera .landing-content {
+  opacity: 0;
+}
+
+#landingCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.landing-content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: clamp(20px, 4vh, 42px);
+  width: min(92vw, 940px);
+  min-height: 48svh;
+}
+
+h1 {
+  margin: 0;
+  max-width: min(920px, 90vw);
+  font-size: clamp(3.2rem, 10vw, 8.2rem);
+  font-weight: 400;
+  line-height: 0.92;
+  letter-spacing: 0;
+}
+
+#landingTitle {
+  display: grid;
+  justify-items: center;
+  row-gap: 0.02em;
+  color: var(--ink);
+  pointer-events: none;
+}
+
+.title-line {
+  display: block;
+  white-space: nowrap;
+}
+
+.title-letter,
+.title-space {
+  display: inline-block;
+  will-change: transform, opacity;
+  transform: translate(var(--live-x, 0px), var(--live-y, 0px)) rotate(var(--live-r, 0deg));
+  transform-origin: 50% 58%;
+  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1), opacity 900ms ease;
+}
+
+.title-space {
+  width: 0.27em;
+}
+
+.start-panel.is-transitioning .title-letter {
+  transform: translate(calc(var(--live-x, 0px) + var(--fail-x, 0px)), calc(var(--live-y, 0px) + var(--fail-y, 0px))) rotate(calc(var(--live-r, 0deg) + var(--fail-r, 0deg)));
+  opacity: var(--fail-o, 0.86);
+  transition: none;
+}
+
+.camera-choice {
+  display: inline-flex;
+  gap: clamp(16px, 4vw, 42px);
+  align-items: center;
+  justify-content: center;
+  transition: opacity 680ms ease, transform 680ms ease;
+}
+
+.choice-button,
+.primary-button {
+  position: relative;
+  min-height: 44px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  isolation: isolate;
+  transition: color 520ms ease, opacity 520ms ease, transform 520ms ease, text-shadow 520ms ease;
+}
+
+.choice-button {
+  font-size: 0.86rem;
+  opacity: 0.48;
+}
+
+.choice-button.is-selected {
+  color: var(--ink);
+  opacity: 0.95;
+}
+
+.primary-button {
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--ink);
+  font-size: 1rem;
+  opacity: 0.9;
+  overflow: visible;
+}
+
+.start-panel.is-button-touched .primary-button,
+.primary-button:focus-visible {
+  color: #050505;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px) skewX(-0.35deg);
+}
+
+.primary-button:active,
+.choice-button:active {
+  opacity: 0.64;
+}
+
+.primary-button:disabled {
+  cursor: default;
+}
+
+.side-selection {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(34px, 8vw, 92px);
+  color: #f2f2f2;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 900ms ease;
+}
+
+.side-selection.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.side-selection.is-exiting {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.side-selection-button {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  color: inherit;
+  font-size: clamp(1.05rem, 2.8vw, 1.55rem);
+  font-weight: 400;
+  opacity: 0.74;
+  cursor: pointer;
+  transition: opacity 420ms ease, transform 420ms ease;
+}
+
+.side-selection-button:disabled {
+  cursor: default;
+}
+
+.start-message {
+  min-height: 1.4em;
+  max-width: min(360px, 84vw);
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  opacity: 0.58;
+  transition: opacity 680ms ease, transform 680ms ease;
+}
+
+.start-panel.is-transitioning .primary-button,
+.start-panel.is-transitioning .camera-choice,
+.start-panel.is-transitioning .start-message {
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+}
+
+.state-panel {
+  position: fixed;
+  left: 50%;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  max-width: calc(100vw - 40px);
+  padding: 0;
+  color: #ededed;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 0.78rem;
+  line-height: 1;
+  letter-spacing: 0;
+  text-shadow: 0 1px 9px rgba(0, 0, 0, 0.72);
+  opacity: 0.7;
+  z-index: 3;
+  transition: opacity 600ms ease;
+}
+
+.state-panel.is-empty {
+  opacity: 0;
+}
+
+.state-panel span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  white-space: nowrap;
+}
+
+.state-panel span + span,
+.state-panel [hidden] {
+  display: none;
+}
+
+.camera-button {
+  display: none !important;
+}
+
+@media (hover: hover) {
+  .choice-button:hover {
+    color: var(--ink);
+    opacity: 0.9;
+    transform: translateY(-1px);
+  }
+
+  .primary-button:hover {
+    color: #050505;
+    transform: translateY(-1px) skewX(-0.35deg);
+  }
+
+  .side-selection-button:not(:disabled):hover {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@media (max-width: 520px) {
+  .landing-content {
+    width: min(88vw, 420px);
+    min-height: 56svh;
+    gap: 25px;
+  }
+
+  h1 {
+    max-width: 86vw;
+    font-size: clamp(3rem, 16vw, 5.5rem);
+    line-height: 0.91;
+  }
+
+  .camera-choice {
+    gap: 24px;
+  }
+
+  .choice-button {
+    min-height: 40px;
+    font-size: 0.84rem;
+  }
+
+  .primary-button {
+    min-height: 46px;
+  }
+
+  .side-selection {
+    gap: 32px;
+  }
+
+  .state-panel {
+    max-width: calc(100vw - 28px);
+    overflow: hidden;
+    font-size: 0.74rem;
+  }
+
+  .state-panel span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .landing-content {
+    min-height: 72svh;
+    gap: 16px;
+  }
+
+  h1 {
+    font-size: clamp(2.5rem, 8vw, 4.7rem);
+  }
+
+  .choice-button {
+    min-height: 34px;
+  }
+}
