@@ -11,14 +11,16 @@
     <title>One of the Sides</title>
     <link rel="stylesheet" href="styles.css">
     <script defer src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
-    <script defer src="app.js"></script>
+    <script defer src="app.js?v=instruction-proximity"></script>
     <script defer src="side2-fluid.js"></script>
     <script defer src="side3-light.js"></script>
+    <script defer src="side-selection.js"></script>
   </head>
   <body>
     <main class="installation" aria-label="One of the Sides camera installation">
       <video id="camera" autoplay muted playsinline></video>
       <canvas id="renderCanvas"></canvas>
+      <button id="sidesButton" class="side-return" type="button" aria-label="Return to Side selection" hidden>&larr; SIDES</button>
 
       <section id="startPanel" class="start-panel" aria-label="One of the Sides start screen">
         <canvas id="landingCanvas" aria-hidden="true"></canvas>
@@ -34,14 +36,44 @@
           </div>
 
           <button id="startButton" class="primary-button" type="button">Start</button>
-          <p id="startMessage" class="start-message">Waiting for presence...</p>
+          <div class="start-instructions">
+            <div class="start-instruction-main">
+              <p>Move in front of the camera.<br>Try moving and raising your arms.<br>Observe how the space and your body change over time.</p>
+              <p class="start-reassurance">There is no right or wrong.</p>
+            </div>
+            <p class="start-stage-hint">1&ndash;5: Jump directly between stages</p>
+            <p id="startMessage" class="start-message"></p>
+          </div>
         </div>
 
         <div id="sideSelection" class="side-selection" aria-label="Select side" hidden>
-          <button class="side-selection-button" type="button" data-side="1">1</button>
-          <button class="side-selection-button" type="button" data-side="2">2</button>
-          <button class="side-selection-button" type="button" data-side="3">3</button>
-          <button class="side-selection-button" type="button" data-side="4">4</button>
+          <canvas class="side-selection-effects" aria-hidden="true"></canvas>
+          <div class="side-selection-columns" lang="de">
+            <button class="side-selection-button" type="button" data-side="1" aria-label="I: Zerst&ouml;rung">
+              <span class="side-selection-numeral" aria-hidden="true">I</span>
+              <span class="side-selection-word" aria-hidden="true">
+                <span class="side-selection-letter">Z</span><span class="side-selection-letter">E</span><span class="side-selection-letter">R</span><span class="side-selection-letter">S</span><span class="side-selection-letter">T</span><span class="side-selection-letter">&Ouml;</span><span class="side-selection-letter">R</span><span class="side-selection-letter">U</span><span class="side-selection-letter">N</span><span class="side-selection-letter">G</span>
+              </span>
+            </button>
+            <button class="side-selection-button" type="button" data-side="2" aria-label="II: Aufl&ouml;sung">
+              <span class="side-selection-numeral" aria-hidden="true">II</span>
+              <span class="side-selection-word" aria-hidden="true">
+                <span class="side-selection-letter">A</span><span class="side-selection-letter">U</span><span class="side-selection-letter">F</span><span class="side-selection-letter">L</span><span class="side-selection-letter">&Ouml;</span><span class="side-selection-letter">S</span><span class="side-selection-letter">U</span><span class="side-selection-letter">N</span><span class="side-selection-letter">G</span>
+              </span>
+            </button>
+            <button class="side-selection-button" type="button" data-side="3" aria-label="III: Ausstrahlung">
+              <span class="side-selection-numeral" aria-hidden="true">III</span>
+              <span class="side-selection-word" aria-hidden="true">
+                <span class="side-selection-letter">A</span><span class="side-selection-letter">U</span><span class="side-selection-letter">S</span><span class="side-selection-letter">S</span><span class="side-selection-letter">T</span><span class="side-selection-letter">R</span><span class="side-selection-letter">A</span><span class="side-selection-letter">H</span><span class="side-selection-letter">L</span><span class="side-selection-letter">U</span><span class="side-selection-letter">N</span><span class="side-selection-letter">G</span>
+              </span>
+            </button>
+            <button class="side-selection-button" type="button" data-side="4" aria-label="IV: Widerhall">
+              <span class="side-selection-numeral" aria-hidden="true">IV</span>
+              <span class="side-selection-word" aria-hidden="true">
+                <span class="side-selection-letter">W</span><span class="side-selection-letter">I</span><span class="side-selection-letter">D</span><span class="side-selection-letter">E</span><span class="side-selection-letter">R</span><span class="side-selection-letter">H</span><span class="side-selection-letter">A</span><span class="side-selection-letter">L</span><span class="side-selection-letter">L</span>
+              </span>
+            </button>
+          </div>
         </div>
       </section>
 

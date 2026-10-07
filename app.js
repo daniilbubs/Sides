@@ -279,6 +279,10 @@ const landingCtx = landingCanvas ? landingCanvas.getContext("2d") : null;
 const landingTitle = document.getElementById("landingTitle");
 const startButton = document.getElementById("startButton");
 const startMessage = document.getElementById("startMessage");
+const startInstructionMain = document.querySelector(".start-instruction-main");
+const instructionPointerMedia = window.matchMedia("(min-width: 769px) and (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference)");
+const instructionTouchMedia = window.matchMedia("(any-pointer: coarse)");
+const instructionMotion = { x: 0, y: 0, targetX: 0, targetY: 0 };
 const sideSelection = document.getElementById("sideSelection");
 const sideSelectionButtons = Array.from(document.querySelectorAll("[data-side]"));
 const cameraChoiceButtons = Array.from(document.querySelectorAll("[data-camera-choice]"));
@@ -286,6 +290,7 @@ const statePanel = document.getElementById("statePanel");
 const stageLabel = document.getElementById("stageLabel");
 const bodyLabel = document.getElementById("bodyLabel");
 const switchCameraButton = document.getElementById("switchCameraButton");
+const sidesButton = document.getElementById("sidesButton");
 
 // Offscreen canvases keep the body mask and digital matter separate from the room.
 const maskCanvas = document.createElement("canvas");
@@ -333,9 +338,14 @@ let frameMemoryIndex = 0;
 let frameMemoryFilled = 0;
 let lastFrameMemoryAt = 0;
 let cameraStream = null;
+let cameraStreamFacingMode = null;
 let cameraFacingMode = CAMERA_FACING_MODE;
 let isRunning = false;
 let isSegmenting = false;
+let segmentationTask = null;
+let mainRunGeneration = 0;
+let mainLoopWake = null;
+let viewportResizeTimer = 0;
 
 let bodyIsPresent = false;
 let lastBodySeenAt = 0;
@@ -365,6 +375,11 @@ let landingFractureRaysCreated = 0;
 let selectedSideNumber = 1;
 let sideSelectionIsActive = false;
 let sideSelectionIsLocked = false;
+let activeSideNumber = 0;
+let navigationHasStarted = false;
+let navigationGeneration = 0;
+let sideExitTask = Promise.resolve();
+let mainCleanupTask = Promise.resolve();
 
 let audioContext = null;
 let audioNodes = null;
@@ -430,6 +445,7 @@ const side4PoseMemory = [];
 const side4MemoryFragments = [];
 const side4RoomMemoryFrames = [];
 const side4RoomMemoryLayers = [];
+const side4ActiveAudioSources = new Map();
 
 const MANUAL_STAGE_PROGRESS = {
   1: 0.08,
@@ -538,8 +554,12 @@ sideSelectionButtons.forEach((button) => {
   button.addEventListener("click", () => selectSide(Number(button.dataset.side || 1)));
 });
 switchCameraButton.addEventListener("click", switchCamera);
+sidesButton.addEventListener("click", returnToSideSelection);
 window.addEventListener("resize", handleViewportResize);
-window.addEventListener("orientationchange", () => window.setTimeout(handleViewportResize, 250));
+window.addEventListener("orientationchange", () => {
+  window.clearTimeout(viewportResizeTimer);
+  viewportResizeTimer = window.setTimeout(handleViewportResize, 250);
+});
 document.addEventListener("keydown", handleKeyboard);
 startPanel.addEventListener("pointermove", handleLandingPointer, { passive: true });
 startPanel.addEventListener("pointerdown", handleLandingPointer, { passive: true });
@@ -548,8 +568,8 @@ document.addEventListener("touchmove", preventPageGesture, { passive: false });
 document.addEventListener("gesturestart", preventPageGesture);
 
 function handleViewportResize() {
-  resizeRenderer();
-  resizeLandingCanvas();
+  if (isRunning || !navigationHasStarted) resizeRenderer();
+  if (!startPanel.classList.contains("is-side-menu")) resizeLandingCanvas();
 }
 
 function preventPageGesture(event) {
@@ -701,6 +721,7 @@ function drawLandingFrame(now) {
   landingLastFrameAt = now;
   landingButtonDamage = Math.max(0, landingButtonDamage - dt * 0.38);
 
+  updateStartInstructionMotion(dt);
   updateStartOriginHoverRays(now);
   updateLandingPressures(now);
   updateLandingNegativeRays(now, transitionProgress, pixelRatio);
@@ -2227,12 +2248,53 @@ function applyLandingLetterTransform(body) {
   body.element.style.setProperty("--fail-o", String(Math.max(0.28, 0.92 - Math.hypot(body.x, body.y) / 1200)));
 }
 
+function updateStartInstructionTarget(event) {
+  if (!startInstructionMain || !instructionPointerMedia.matches || instructionTouchMedia.matches
+      || event.pointerType !== "mouse" || landingIsTransitioning || sideSelectionIsActive) return;
+
+  const rect = startInstructionMain.getBoundingClientRect();
+  const dx = event.clientX - (rect.left - instructionMotion.x + rect.width * 0.5);
+  const dy = event.clientY - (rect.top - instructionMotion.y + rect.height * 0.5);
+  const distance = Math.hypot(Math.max(0, Math.abs(dx) - rect.width * 0.5), Math.max(0, Math.abs(dy) - rect.height * 0.5));
+  const proximity = 1 - smoothstep(0, 130, distance);
+
+  instructionMotion.targetX = -Math.tanh(dx / 200) * 2.2 * proximity;
+  instructionMotion.targetY = -Math.tanh(dy / 140) * 1.4 * proximity;
+}
+
+function updateStartInstructionMotion(dt) {
+  if (!startInstructionMain) return;
+  if (!instructionPointerMedia.matches || instructionTouchMedia.matches) {
+    if (instructionMotion.x || instructionMotion.y) {
+      startInstructionMain.style.removeProperty("--instruction-x");
+      startInstructionMain.style.removeProperty("--instruction-y");
+    }
+    instructionMotion.x = instructionMotion.y = instructionMotion.targetX = instructionMotion.targetY = 0;
+    return;
+  }
+  if (landingIsTransitioning || sideSelectionIsActive) {
+    instructionMotion.targetX = instructionMotion.targetY = 0;
+  }
+
+  const dx = instructionMotion.targetX - instructionMotion.x;
+  const dy = instructionMotion.targetY - instructionMotion.y;
+  if (dx === 0 && dy === 0) return;
+
+  const blend = 1 - Math.exp(-dt / 0.28);
+  instructionMotion.x = Math.abs(dx) < 0.002 ? instructionMotion.targetX : instructionMotion.x + dx * blend;
+  instructionMotion.y = Math.abs(dy) < 0.002 ? instructionMotion.targetY : instructionMotion.y + dy * blend;
+  startInstructionMain.style.setProperty("--instruction-x", instructionMotion.x.toFixed(3) + "px");
+  startInstructionMain.style.setProperty("--instruction-y", instructionMotion.y.toFixed(3) + "px");
+}
+
 function handleLandingPointer(event) {
+  if (startPanel.classList.contains("is-side-menu")) return;
   landingPointerX = event.clientX;
   landingPointerY = event.clientY;
   landingPointerActiveUntil = performance.now() + 900;
   startPanel.classList.add("is-pointer-damaging");
   deformLandingTitleFromPointer(event.clientX, event.clientY);
+  updateStartInstructionTarget(event);
 
   if (event.type === "pointerdown" && !landingIsTransitioning && !startButton.contains(event.target)) {
     handleLandingFragmentClick(event.clientX, event.clientY);
@@ -2267,6 +2329,7 @@ function handleLandingFragmentClick(clientX, clientY) {
 }
 
 function clearLandingPointer() {
+  instructionMotion.targetX = instructionMotion.targetY = 0;
   landingPointerActiveUntil = 0;
   startPanel.classList.remove("is-pointer-damaging");
   relaxLandingTitle();
@@ -2408,6 +2471,7 @@ function showSideSelection() {
     return;
   }
 
+  navigationHasStarted = true;
   sideSelectionIsActive = true;
   sideSelectionIsLocked = false;
   sideSelection.hidden = false;
@@ -2426,6 +2490,9 @@ function selectSide(sideNumber) {
 
   const safeSideNumber = [1, 2, 3, 4].includes(sideNumber) ? sideNumber : 1;
   selectedSideNumber = safeSideNumber;
+  if (selectedSideNumber === 1 || selectedSideNumber === 4) {
+    startInteractiveSoundLayer();
+  }
   if (selectedSideNumber === 2 && window.Side2Fluid && typeof window.Side2Fluid.primeAudio === "function") {
     window.Side2Fluid.primeAudio();
   }
@@ -2441,6 +2508,7 @@ function selectSide(sideNumber) {
     sideSelection.classList.remove("is-visible");
     sideSelection.classList.add("is-exiting");
   }
+  startPanel.classList.add("is-side-menu");
 
   window.setTimeout(() => {
     if (sideSelection) {
@@ -2453,34 +2521,78 @@ function selectSide(sideNumber) {
   }, 900);
 }
 
-function enterSelectedSide() {
+async function enterSelectedSide() {
+  const generation = ++navigationGeneration;
+  await sideExitTask;
+  if (generation !== navigationGeneration) return;
   const route = SIDE_ROUTES[selectedSideNumber] || SIDE_ROUTES[1];
-  route();
+  await route();
 }
 
 function stopExternalSideModules(activeSide) {
+  const cleanup = [];
   if (activeSide !== 2 && window.Side2Fluid && typeof window.Side2Fluid.stop === "function") {
-    window.Side2Fluid.stop();
+    cleanup.push(window.Side2Fluid.stop({ keepCamera: true }));
   }
   if (activeSide !== 3 && window.Side3Light && typeof window.Side3Light.stop === "function") {
-    window.Side3Light.stop();
+    cleanup.push(window.Side3Light.stop({ keepCamera: true }));
   }
+  return Promise.all(cleanup);
 }
 
-function startSideOne() {
-  stopExternalSideModules(1);
+function activateSideNavigation() {
+  navigationHasStarted = true;
+  activeSideNumber = selectedSideNumber;
+  cameraStream = video.srcObject;
+  cameraStreamFacingMode = cameraFacingMode;
+  sidesButton.hidden = false;
+  if (landingIsTransitioning) startPanel.classList.remove("is-side-menu");
+}
+
+function returnToSideSelection() {
+  if (!activeSideNumber) return;
+  activeSideNumber = 0;
+  navigationGeneration += 1;
+  sidesButton.hidden = true;
+  cameraStream = video.srcObject || cameraStream;
+  sideExitTask = Promise.all([stopMainInstallation(), stopExternalSideModules(0)]);
+
+  stopLandingAnimation();
+  landingIsTransitioning = false;
+  landingCameraRevealStartTime = 0;
+  landingRevealCompleted = true;
+  landingCanvas.width = landingCanvas.height = 1;
+  window.clearTimeout(viewportResizeTimer);
+  startPanel.classList.add("is-side-menu");
+  startPanel.classList.remove("is-hidden", "is-revealing-camera", "is-transitioning");
+  updateStatusText("", "");
+  sideSelectionIsActive = false;
+  showSideSelection();
+}
+
+function getReusableCameraStream() {
+  return cameraStream && cameraStreamFacingMode === cameraFacingMode
+    && cameraStream.getVideoTracks().some((track) => track.readyState === "live")
+    ? cameraStream
+    : null;
+}
+
+async function startSideOne() {
+  await stopExternalSideModules(1);
   return startInstallation();
 }
 
-function startSideTwo() {
-  stopExternalSideModules(2);
+async function startSideTwo() {
+  await Promise.all([stopMainInstallation(), stopExternalSideModules(2)]);
   if (!window.Side2Fluid || typeof window.Side2Fluid.start !== "function") {
     return startSideOne();
   }
 
   return window.Side2Fluid.start({
     facingMode: cameraFacingMode,
+    stream: getReusableCameraStream(),
     onReady: () => {
+      activateSideNavigation();
       switchCameraButton.hidden = true;
       updateStatusText("", "");
 
@@ -2496,6 +2608,13 @@ function startSideTwo() {
       }
     },
     onError: (error) => {
+      window.Side2Fluid.stop({ keepCamera: navigationHasStarted });
+      if (navigationHasStarted) {
+        activeSideNumber = selectedSideNumber;
+        returnToSideSelection();
+        console.error(error);
+        return;
+      }
       landingHasStartedCamera = false;
       landingIsTransitioning = false;
       landingCameraRevealStartTime = 0;
@@ -2516,15 +2635,17 @@ function startSideTwo() {
   });
 }
 
-function startSideThree() {
-  stopExternalSideModules(3);
+async function startSideThree() {
+  await Promise.all([stopMainInstallation(), stopExternalSideModules(3)]);
   if (!window.Side3Light || typeof window.Side3Light.start !== "function") {
     return startSideOne();
   }
 
   return window.Side3Light.start({
     facingMode: cameraFacingMode,
+    stream: getReusableCameraStream(),
     onReady: () => {
+      activateSideNavigation();
       switchCameraButton.hidden = true;
       updateStatusText("", "");
 
@@ -2540,6 +2661,13 @@ function startSideThree() {
       }
     },
     onError: (error) => {
+      window.Side3Light.stop({ keepCamera: navigationHasStarted });
+      if (navigationHasStarted) {
+        activeSideNumber = selectedSideNumber;
+        returnToSideSelection();
+        console.error(error);
+        return;
+      }
       landingHasStartedCamera = false;
       landingIsTransitioning = false;
       landingCameraRevealStartTime = 0;
@@ -2561,11 +2689,12 @@ function startSideThree() {
 }
 
 function startSideFour() {
-  stopExternalSideModules(4);
   return startSideOne();
 }
 
 async function startInstallation() {
+  await mainCleanupTask;
+  const generation = ++mainRunGeneration;
   startButton.disabled = true;
   startMessage.textContent = "Waiting for presence...";
 
@@ -2574,15 +2703,20 @@ async function startInstallation() {
     ensureSegmentationIsAvailable();
 
     await openCamera(cameraFacingMode);
+    if (generation !== mainRunGeneration) return;
     await setupSegmenter();
-    setupPoseTracking();
+    if (generation !== mainRunGeneration) return;
+    if (poseDetector) poseStartedAt = performance.now();
+    setupPoseTracking(generation);
 
     isRunning = true;
     resetTransformation();
+    startInteractiveSoundLayer();
 
     switchCameraButton.hidden = true;
     updateStatusText("Waiting for presence...", "");
-    runSegmentationLoop();
+    activateSideNavigation();
+    segmentationTask = runSegmentationLoop(generation);
 
     if (landingIsTransitioning) {
       startPanel.classList.add("is-revealing-camera");
@@ -2595,6 +2729,13 @@ async function startInstallation() {
       stopLandingAnimation();
     }
   } catch (error) {
+    if (generation !== mainRunGeneration) return;
+    if (navigationHasStarted) {
+      activeSideNumber = selectedSideNumber;
+      returnToSideSelection();
+      console.error(error);
+      return;
+    }
     landingHasStartedCamera = false;
     landingIsTransitioning = false;
     landingCameraRevealStartTime = 0;
@@ -2612,6 +2753,57 @@ async function startInstallation() {
     startLandingAnimation();
     console.error(error);
   }
+}
+
+function stopMainInstallation() {
+  isRunning = false;
+  mainRunGeneration += 1;
+  if (mainLoopWake) mainLoopWake();
+  const audioCleanup = stopMainSideAudio();
+  bodyIsPresent = false;
+  lastBodySeenAt = 0;
+  latestPoseLandmarks = latestPoseScreenLandmarks = previousPoseScreenLandmarks = null;
+  latestPoseBounds = latestMaskPixels = null;
+  latestPoseVisibleCount = latestPoseMotionAmount = latestMaskCoverage = 0;
+  lastPoseSeenAt = lastPoseSentAt = lastSegmentationSentAt = 0;
+  latestProgress = 0;
+  manualStage = null;
+  trailFragments.length = 0;
+  resetSide4TemporalMemory();
+  [maskCanvas, bodyCanvas, deformedBodyCanvas, ...frameMemoryCanvases, ...side4RoomMemoryCanvases].forEach((target) => {
+    target.width = target.height = 1;
+  });
+  frameMemoryIndex = frameMemoryFilled = lastFrameMemoryAt = 0;
+  mainCleanupTask = Promise.all([segmentationTask, audioCleanup]).catch((error) => console.warn("Side processing cleanup failed.", error));
+  return mainCleanupTask;
+}
+
+function stopMainSideAudio() {
+  audioStarted = false;
+  let audioCleanup = Promise.resolve();
+  if (audioContext && audioNodes) {
+    const time = audioContext.currentTime;
+    pauseSide4SoundtrackPlayback(time);
+    audioNodes.masterGain.gain.cancelScheduledValues(time);
+    audioNodes.masterGain.gain.setValueAtTime(0, time);
+    side4ActiveAudioSources.forEach((gain, source) => {
+      source.onended = null;
+      try { source.stop(time); } catch (error) { /* Already ended. */ }
+      source.disconnect();
+      gain.disconnect();
+    });
+    side4ActiveAudioSources.clear();
+    audioCleanup = audioContext.suspend().catch(() => {});
+  }
+  side4SoundtrackSource = side4SoundtrackFadingSource = null;
+  side4SoundtrackActive = side4SoundtrackStopScheduled = false;
+  side4SmoothedDestruction = 0;
+  side4NextStructuralGrainAt = side4StructuralGrainSerial = 0;
+  resetSide4SoundtrackFailureEvents();
+  audioTargetLeftPresence = audioTargetRightMovement = audioTargetMovement = 0;
+  audioSmoothedLeftPresence = audioSmoothedRightMovement = audioSmoothedMovement = 0;
+  audioFractureEnergy = audioLastUpdateAt = 0;
+  return audioCleanup;
 }
 
 // -----------------------------------------------------------------------------
@@ -2634,6 +2826,12 @@ function startInteractiveSoundLayer() {
     loadChoirAudioSampleIfNeeded();
     setupSide4SoundtrackSource(audioContext, audioNodes);
     loadSide4SoundtrackIfNeeded();
+  }
+
+  if (selectedSideNumber === 1) {
+    const time = audioContext.currentTime;
+    audioNodes.synthGain.gain.setTargetAtTime(audioSampleSource ? 0.04 : 1, time, 0.14);
+    audioNodes.sampleGain.gain.setTargetAtTime(audioSampleSource ? 0.9 : 0, time, 0.14);
   }
 
   audioStarted = true;
@@ -2953,6 +3151,9 @@ function createSide4SoundtrackVoice(offset, time, fadeInSeconds) {
   }
 
   source.onended = () => {
+    side4ActiveAudioSources.delete(source);
+    source.disconnect();
+    voiceGain.disconnect();
     if (side4SoundtrackSource === voice) {
       side4SoundtrackSource = null;
       if (side4SoundtrackActive && !voice.stopScheduled) {
@@ -2967,6 +3168,7 @@ function createSide4SoundtrackVoice(offset, time, fadeInSeconds) {
     side4SoundtrackStopScheduled = false;
   };
 
+  side4ActiveAudioSources.set(source, voiceGain);
   source.start(startTime, voice.offset);
 
   return voice;
@@ -3480,12 +3682,21 @@ function spawnSide4MicroLoopGrain(time, depth, baseOffset, serial, repeatIndex, 
 
   source.connect(grainGain);
   grainGain.connect(audioNodes.side4StructuralGrainGain);
+  side4ActiveAudioSources.set(source, grainGain);
+  source.onended = () => {
+    side4ActiveAudioSources.delete(source);
+    source.disconnect();
+    grainGain.disconnect();
+  };
 
   try {
     source.start(startTime, sourceOffset, grainSeconds);
     source.stop(endTime + 0.04);
   } catch (error) {
     // Very short fragments can become invalid if the audio clock advances mid-schedule.
+    side4ActiveAudioSources.delete(source);
+    source.disconnect();
+    grainGain.disconnect();
   }
 }
 
@@ -3622,18 +3833,20 @@ function ensureSegmentationIsAvailable() {
 }
 
 async function openCamera(facingMode) {
-  stopCamera();
+  if (!getReusableCameraStream()) {
+    stopCamera();
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    });
+    cameraStreamFacingMode = facingMode;
+  }
 
-  cameraStream = await navigator.mediaDevices.getUserMedia({
-    audio: false,
-    video: {
-      facingMode: { ideal: facingMode },
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
-    }
-  });
-
-  video.srcObject = cameraStream;
+  if (video.srcObject !== cameraStream) video.srcObject = cameraStream;
   await video.play();
 
   if (!video.videoWidth || !video.videoHeight) {
@@ -3669,13 +3882,14 @@ async function setupSegmenter() {
 }
 
 
-async function setupPoseTracking() {
+async function setupPoseTracking(generation = mainRunGeneration) {
   if (!POSE_TRACKING_ENABLED || poseDetector || poseLoadFailed) return;
 
   try {
     if (typeof Pose === "undefined") {
       await loadExternalScript(POSE_SCRIPT_URL);
     }
+    if (generation !== mainRunGeneration) return;
 
     if (typeof Pose === "undefined") {
       throw new Error("The pose tracking library could not be loaded.");
@@ -3739,33 +3953,38 @@ async function switchCamera() {
 
 // MediaPipe is called one frame at a time. This is calmer and more stable on
 // mobile devices than sending many frames at once.
-async function runSegmentationLoop() {
+async function runSegmentationLoop(generation) {
   if (!isRunning || isSegmenting) return;
 
   isSegmenting = true;
 
-  while (isRunning) {
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      try {
-        const now = performance.now();
-        const segmentationInterval = getMainSegmentationInterval();
-        if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
-          lastSegmentationSentAt = now;
-          await segmenter.send({ image: video });
-          await maybeSendPoseFrame(now);
+  try {
+    while (isRunning && generation === mainRunGeneration) {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        try {
+          const now = performance.now();
+          const segmentationInterval = getMainSegmentationInterval();
+          if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
+            lastSegmentationSentAt = now;
+            await segmenter.send({ image: video });
+            if (!isRunning || generation !== mainRunGeneration) break;
+            await maybeSendPoseFrame(now);
+          }
+        } catch (error) {
+          if (!isRunning || generation !== mainRunGeneration) break;
+          console.error(error);
+          await wait(120);
         }
-      } catch (error) {
-        console.error(error);
-        await wait(120);
+      } else {
+        await wait(60);
       }
-    } else {
-      await wait(60);
+
+      if (!isRunning || generation !== mainRunGeneration) break;
+      await nextAnimationFrame();
     }
-
-    await nextAnimationFrame();
+  } finally {
+    isSegmenting = false;
   }
-
-  isSegmenting = false;
 }
 
 
@@ -3783,6 +4002,7 @@ async function maybeSendPoseFrame(now) {
 }
 
 function handleSegmentationResults(results) {
+  if (!isRunning) return;
   const now = performance.now();
 
   resizeRenderer();
@@ -3793,6 +4013,7 @@ function handleSegmentationResults(results) {
 
 
 function handlePoseResults(results) {
+  if (!isRunning) return;
   const now = performance.now();
   const landmarks = results.poseLandmarks || [];
 
@@ -6345,6 +6566,7 @@ function drawSubtleOuterFragments(targetCtx, progress, now) {
 // -----------------------------------------------------------------------------
 
 function handleKeyboard(event) {
+  if (!isRunning) return;
   const key = event.key.toLowerCase();
 
   if (key >= "1" && key <= "5") {
@@ -6424,7 +6646,7 @@ function resizeRenderer() {
   const width = Math.max(1, Math.round(cssWidth * pixelRatio));
   const height = Math.max(1, Math.round(cssHeight * pixelRatio));
 
-  if (canvas.width === width && canvas.height === height) return;
+  if (canvas.width === width && canvas.height === height && maskCanvas.width === width && maskCanvas.height === height) return;
 
   canvas.width = width;
   canvas.height = height;
@@ -7155,11 +7377,27 @@ function hash2(x, y, salt = 0) {
 }
 
 function wait(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const finish = () => {
+      window.clearTimeout(timer);
+      mainLoopWake = null;
+      resolve();
+    };
+    const timer = window.setTimeout(finish, ms);
+    mainLoopWake = finish;
+  });
 }
 
 function nextAnimationFrame() {
-  return new Promise((resolve) => window.requestAnimationFrame(resolve));
+  return new Promise((resolve) => {
+    const finish = () => {
+      window.cancelAnimationFrame(frame);
+      mainLoopWake = null;
+      resolve();
+    };
+    const frame = window.requestAnimationFrame(finish);
+    mainLoopWake = finish;
+  });
 }
 
 function updateStatusText(stage, body) {

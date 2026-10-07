@@ -100,6 +100,51 @@ button:focus-visible {
   opacity: 0;
 }
 
+.start-panel.is-side-menu {
+  background: #000;
+  transition-duration: 240ms;
+}
+
+.start-panel.is-side-menu .landing-content,
+.start-panel.is-side-menu #landingCanvas {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.start-panel.is-side-menu .side-selection:not(.is-exiting) {
+  transition-duration: 240ms;
+}
+
+.side-return {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 12px;
+  color: #f2f2f2;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  letter-spacing: 0;
+  opacity: 0.4;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: opacity 300ms ease;
+}
+
+.side-return[hidden] {
+  display: none;
+}
+
+.side-return:focus-visible {
+  opacity: 0.6;
+}
+
 #landingCanvas {
   position: absolute;
   inset: 0;
@@ -220,17 +265,23 @@ h1 {
 }
 
 .side-selection {
+  --selection-letter-size: 25px;
+  --selection-letter-step: 32px;
+  --selection-label-gap: 30px;
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: clamp(34px, 8vw, 92px);
-  color: #f2f2f2;
+  display: grid;
+  place-items: center;
+  background: #000;
+  color: #a6a6a6;
   opacity: 0;
   pointer-events: none;
   transition: opacity 900ms ease;
+}
+
+.side-selection[hidden] {
+  display: none;
 }
 
 .side-selection.is-visible {
@@ -244,15 +295,81 @@ h1 {
 }
 
 .side-selection-button {
-  min-width: 0;
+  --preview: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+  min-width: 44px;
   min-height: 44px;
   padding: 0;
   color: inherit;
-  font-size: clamp(1.05rem, 2.8vw, 1.55rem);
-  font-weight: 400;
-  opacity: 0.74;
+  font-size: var(--selection-letter-size);
+  font-weight: 300;
+  letter-spacing: 0;
   cursor: pointer;
-  transition: opacity 420ms ease, transform 420ms ease;
+  touch-action: manipulation;
+}
+
+.side-selection-columns {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(44px, 1fr));
+  width: min(720px, calc(100% - 48px));
+}
+
+.side-selection-numeral {
+  display: block;
+  height: 14px;
+  margin-bottom: var(--selection-label-gap);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 14px;
+  color: #666;
+}
+
+.side-selection-word {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: calc(var(--selection-letter-step) * 12);
+}
+
+.side-selection-letter {
+  display: grid;
+  place-items: center;
+  width: 1.65em;
+  height: var(--selection-letter-step);
+  flex: 0 0 var(--selection-letter-step);
+  line-height: 1;
+  transform-origin: center;
+}
+
+.side-selection-button[data-side="2"].is-dissolving .side-selection-letter {
+  --erosion: 1;
+  -webkit-mask-image: linear-gradient(to bottom, #000 23%, rgba(0, 0, 0, var(--erosion)) 30%, #000 39%, #000 58%, rgba(0, 0, 0, var(--erosion)) 65%, #000 74%);
+  mask-image: linear-gradient(to bottom, #000 23%, rgba(0, 0, 0, var(--erosion)) 30%, #000 39%, #000 58%, rgba(0, 0, 0, var(--erosion)) 65%, #000 74%);
+}
+
+.side-selection-button[data-side="3"] .side-selection-letter {
+  color: rgb(calc(166 + var(--preview) * 75), calc(166 + var(--preview) * 75), calc(166 + var(--preview) * 75));
+}
+
+.side-selection-button:focus-visible .side-selection-numeral {
+  color: #eee;
+  text-decoration: underline;
+  text-underline-offset: 5px;
+}
+
+.side-selection-effects {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .side-selection-button:disabled {
@@ -270,8 +387,42 @@ h1 {
   transition: opacity 680ms ease, transform 680ms ease;
 }
 
+.start-instructions {
+  max-width: min(420px, 84vw);
+  color: #808080;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+  transition: opacity 680ms ease, transform 680ms ease;
+}
+
+.start-instructions p {
+  margin: 0;
+}
+
+.start-instructions .start-reassurance {
+  margin-top: 16px;
+  color: #969696;
+}
+
+.start-instructions .start-stage-hint {
+  display: none;
+  margin-top: 14px;
+  color: #a0a0a0;
+  font-size: 11px;
+}
+
+.start-instructions .start-message {
+  margin-top: 14px;
+}
+
+.start-message:empty {
+  display: none;
+}
+
 .start-panel.is-transitioning .primary-button,
 .start-panel.is-transitioning .camera-choice,
+.start-panel.is-transitioning .start-instructions,
 .start-panel.is-transitioning .start-message {
   opacity: 0;
   transform: translateY(10px);
@@ -324,6 +475,10 @@ h1 {
 }
 
 @media (hover: hover) {
+  .side-return:hover {
+    opacity: 0.6;
+  }
+
   .choice-button:hover {
     color: var(--ink);
     opacity: 0.9;
@@ -334,10 +489,25 @@ h1 {
     color: #050505;
     transform: translateY(-1px) skewX(-0.35deg);
   }
+}
 
-  .side-selection-button:not(:disabled):hover {
-    opacity: 1;
-    transform: scale(1.08);
+@media (min-width: 769px) and (hover: hover) and (pointer: fine) {
+  .start-instruction-main {
+    transform: translate(var(--instruction-x, 0px), var(--instruction-y, 0px));
+  }
+
+  .start-instructions .start-stage-hint {
+    display: block;
+  }
+}
+
+@media (any-pointer: coarse) {
+  .start-instruction-main {
+    transform: none;
+  }
+
+  .start-instructions .start-stage-hint {
+    display: none;
   }
 }
 
@@ -368,7 +538,13 @@ h1 {
   }
 
   .side-selection {
-    gap: 32px;
+    --selection-letter-size: 19px;
+    --selection-letter-step: 25px;
+    --selection-label-gap: 25px;
+  }
+
+  .side-selection-columns {
+    width: calc(100% - 32px);
   }
 
   .state-panel {
@@ -384,6 +560,22 @@ h1 {
   }
 }
 
+@media (max-height: 620px) {
+  .side-selection {
+    --selection-letter-size: 19px;
+    --selection-letter-step: 24px;
+    --selection-label-gap: 22px;
+  }
+}
+
+@media (max-height: 420px) {
+  .side-selection {
+    --selection-letter-size: 14px;
+    --selection-letter-step: 18px;
+    --selection-label-gap: 15px;
+  }
+}
+
 @media (orientation: landscape) and (max-height: 520px) {
   .landing-content {
     min-height: 72svh;
@@ -396,5 +588,14 @@ h1 {
 
   .choice-button {
     min-height: 34px;
+  }
+
+  .start-instructions {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  .start-instructions .start-reassurance {
+    margin-top: 10px;
   }
 }

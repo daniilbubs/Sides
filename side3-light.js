@@ -119,6 +119,12 @@
   let poseDetector = null;
   let running = false;
   let segmenting = false;
+  let starting = false;
+  let runGeneration = 0;
+  let processingTask = null;
+  let cleanupTask = Promise.resolve();
+  let loopWake = null;
+  let orientationTimer = 0;
   let lastSegmentationSentAt = 0;
   let facingMode = "environment";
   let bodyIsPresent = false;
@@ -182,9 +188,11 @@
   const afterimageContexts = afterimageCanvases.map((targetCanvas) => targetCanvas.getContext("2d"));
 
   async function start(options = {}) {
+    if (running || stream || starting) await stop({ keepCamera: true });
+    await cleanupTask;
+    const generation = ++runGeneration;
+    starting = true;
     try {
-      if (running || stream) stop();
-
       video = document.getElementById("camera");
       canvas = document.getElementById("renderCanvas");
       ctx = canvas.getContext("2d", { alpha: false });
@@ -194,13 +202,16 @@
       ensureCameraIsAvailable();
       ensureSegmentationIsAvailable();
       resizeRenderer();
-      await openCamera(facingMode);
+      await openCamera(facingMode, options.stream, generation);
+      if (generation !== runGeneration) return;
       await setupSegmenter();
-      await setupPoseTracking();
+      await setupPoseTracking(generation);
+      if (generation !== runGeneration) return;
 
+      starting = false;
       running = true;
       resetTransformation();
-      runSegmentationLoop();
+      processingTask = runSegmentationLoop(generation);
       window.addEventListener("resize", resizeRenderer);
       window.addEventListener("orientationchange", handleOrientationChange);
       document.addEventListener("keydown", handleKeyboard);
@@ -209,6 +220,8 @@
         options.onReady();
       }
     } catch (error) {
+      if (generation !== runGeneration) return;
+      starting = false;
       if (typeof options.onError === "function") {
         options.onError(error);
       } else {
@@ -217,14 +230,19 @@
     }
   }
 
-  function stop() {
+  function stop(options = {}) {
     running = false;
+    starting = false;
+    runGeneration += 1;
+    if (loopWake) loopWake();
+    window.clearTimeout(orientationTimer);
+    orientationTimer = 0;
     window.removeEventListener("resize", resizeRenderer);
     window.removeEventListener("orientationchange", handleOrientationChange);
     document.removeEventListener("keydown", handleKeyboard);
 
     const activeStream = stream;
-    if (activeStream) {
+    if (activeStream && !options.keepCamera) {
       activeStream.getTracks().forEach((track) => track.stop());
       if (video && video.srcObject === activeStream) video.srcObject = null;
     }
@@ -232,32 +250,40 @@
     lastSegmentationSentAt = 0;
     lastPoseSentAt = 0;
 
-    if (segmenter && typeof segmenter.close === "function") {
-      try {
-        segmenter.close();
-      } catch (error) {
-        console.warn("Side 3 segmentation cleanup skipped.", error);
-      }
-    }
+    const models = [segmenter, poseDetector];
     segmenter = null;
-
-    if (poseDetector && typeof poseDetector.close === "function") {
-      try {
-        poseDetector.close();
-      } catch (error) {
-        console.warn("Side 3 pose cleanup skipped.", error);
-      }
-    }
     poseDetector = null;
 
+    let audioCleanup = Promise.resolve();
     if (audioContext && audioNodes && audioNodes.master) {
       const time = audioContext.currentTime;
-      audioNodes.master.gain.setTargetAtTime(0, time, 0.08);
-      if (audioContext.state === "running") {
-        audioContext.suspend().catch(() => {});
-      }
+      audioNodes.master.gain.cancelScheduledValues(time);
+      audioNodes.master.gain.setValueAtTime(0, time);
+      audioCleanup = audioContext.close().catch(() => {});
     }
+    audioContext = audioNodes = null;
     audioStarted = false;
+    audioTargetVolume = audioTargetSpeed = 0;
+    audioSmoothedVolume = audioSmoothedSpeed = audioLastUpdateAt = 0;
+    nextMusicBoxNoteTime = musicBoxNoteIndex = 0;
+    latestPosePoints = null;
+    manualStage = null;
+    lastBodySeenAt = 0;
+    lastVisualFrameAt = 0;
+    resetTransformation();
+    [currentCanvas, maskCanvas, stableMaskCanvas, stableMaskBufferCanvas, shellCanvas,
+      lightCanvas, haloCanvas, diffusionCanvas, ...afterimageCanvases].forEach((target) => {
+      target.width = target.height = 1;
+    });
+
+    // Drain the last submission before closing MediaPipe's native resources.
+    cleanupTask = Promise.all([cleanupTask, processingTask, audioCleanup]).then(async () => {
+      for (const model of models) {
+        if (!model || typeof model.close !== "function") continue;
+        try { await model.close(); } catch (error) { console.warn("Side 3 tracking cleanup skipped.", error); }
+      }
+    });
+    return cleanupTask;
   }
 
   function primeAudio() {
@@ -320,12 +346,12 @@
     }
   }
 
-  async function openCamera(mode) {
+  async function openCamera(mode, sharedStream, generation) {
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
     }
 
-    stream = await navigator.mediaDevices.getUserMedia({
+    const nextStream = sharedStream || await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         facingMode: { ideal: mode },
@@ -333,9 +359,15 @@
         height: { ideal: SIDE3_CAMERA_HEIGHT }
       }
     });
+    if (generation !== runGeneration) {
+      if (!sharedStream) nextStream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    stream = nextStream;
 
-    video.srcObject = stream;
+    if (video.srcObject !== stream) video.srcObject = stream;
     await video.play();
+    if (generation !== runGeneration) return;
 
     if (!video.videoWidth || !video.videoHeight) {
       await new Promise((resolve) => {
@@ -343,7 +375,7 @@
       });
     }
 
-    resizeRenderer();
+    if (generation === runGeneration) resizeRenderer();
   }
 
   async function setupSegmenter() {
@@ -359,13 +391,13 @@
     segmenter.onResults(handleSegmentationResults);
   }
 
-  async function setupPoseTracking() {
+  async function setupPoseTracking(generation) {
     try {
       if (typeof Pose === "undefined") {
         await loadExternalScript(SIDE3_POSE_SCRIPT_URL);
       }
 
-      if (typeof Pose === "undefined") return;
+      if (generation !== runGeneration || typeof Pose === "undefined") return;
 
       poseDetector = new Pose({
         locateFile: (file) => "https://cdn.jsdelivr.net/npm/@mediapipe/pose/" + file
@@ -403,33 +435,38 @@
     });
   }
 
-  async function runSegmentationLoop() {
+  async function runSegmentationLoop(generation) {
     if (!running || segmenting) return;
 
     segmenting = true;
 
-    while (running) {
-      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        try {
-          const now = performance.now();
-          const segmentationInterval = getSide3SegmentationInterval();
-          if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
-            lastSegmentationSentAt = now;
-            await segmenter.send({ image: video });
-            await maybeSendPoseFrame(now);
+    try {
+      while (running && generation === runGeneration) {
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          try {
+            const now = performance.now();
+            const segmentationInterval = getSide3SegmentationInterval();
+            if (!segmentationInterval || now - lastSegmentationSentAt >= segmentationInterval) {
+              lastSegmentationSentAt = now;
+              await segmenter.send({ image: video });
+              if (!running || generation !== runGeneration) break;
+              await maybeSendPoseFrame(now);
+            }
+          } catch (error) {
+            if (!running || generation !== runGeneration) break;
+            console.error(error);
+            await wait(120);
           }
-        } catch (error) {
-          console.error(error);
-          await wait(120);
+        } else {
+          await wait(60);
         }
-      } else {
-        await wait(60);
+
+        if (!running || generation !== runGeneration) break;
+        await nextAnimationFrame();
       }
-
-      await nextAnimationFrame();
+    } finally {
+      segmenting = false;
     }
-
-    segmenting = false;
   }
 
   async function maybeSendPoseFrame(now) {
@@ -1928,7 +1965,10 @@
   }
 
   function handleOrientationChange() {
-    window.setTimeout(resizeRenderer, 250);
+    window.clearTimeout(orientationTimer);
+    orientationTimer = window.setTimeout(() => {
+      if (running) resizeRenderer();
+    }, 250);
   }
 
   function isMobilePerformanceProfile() {
@@ -1993,7 +2033,7 @@
     const width = Math.max(1, Math.round(viewportWidth * pixelRatio * scale));
     const height = Math.max(1, Math.round(viewportHeight * pixelRatio * scale));
 
-    if (canvas.width === width && canvas.height === height) return;
+    if (canvas.width === width && canvas.height === height && maskCanvas.width === width && maskCanvas.height === height) return;
 
     [canvas, currentCanvas, maskCanvas, stableMaskCanvas, stableMaskBufferCanvas, shellCanvas, lightCanvas, haloCanvas, diffusionCanvas].forEach((target) => {
       target.width = width;
@@ -2105,11 +2145,27 @@
   }
 
   function wait(ms) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const finish = () => {
+        window.clearTimeout(timer);
+        loopWake = null;
+        resolve();
+      };
+      const timer = window.setTimeout(finish, ms);
+      loopWake = finish;
+    });
   }
 
   function nextAnimationFrame() {
-    return new Promise((resolve) => window.requestAnimationFrame(resolve));
+    return new Promise((resolve) => {
+      const finish = () => {
+        window.cancelAnimationFrame(frame);
+        loopWake = null;
+        resolve();
+      };
+      const frame = window.requestAnimationFrame(finish);
+      loopWake = finish;
+    });
   }
 
   window.Side3Light = {
