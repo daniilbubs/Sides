@@ -535,6 +535,8 @@ const STRUCTURE_LANDMARKS = [
 // STARTUP
 // -----------------------------------------------------------------------------
 
+window.MobileSideAudio = isMobilePerformanceProfile() ? createMobileSideAudio() : null;
+
 statePanel.hidden = !SHOW_STATUS_PANEL;
 if (bodyLabel) bodyLabel.hidden = true;
 setupLandingTitle();
@@ -2442,6 +2444,7 @@ async function beginLandingTransition() {
   if (landingHasStartedCamera) return;
 
   const now = performance.now();
+  if (window.MobileSideAudio) window.MobileSideAudio.unlock();
   startInteractiveSoundLayer();
   landingHasStartedCamera = true;
   landingIsTransitioning = true;
@@ -2793,7 +2796,9 @@ function stopMainSideAudio() {
       gain.disconnect();
     });
     side4ActiveAudioSources.clear();
-    audioCleanup = audioContext.suspend().catch(() => {});
+    audioCleanup = window.MobileSideAudio
+      ? window.MobileSideAudio.suspend("main")
+      : audioContext.suspend().catch(() => {});
   }
   side4SoundtrackSource = side4SoundtrackFadingSource = null;
   side4SoundtrackActive = side4SoundtrackStopScheduled = false;
@@ -2810,6 +2815,104 @@ function stopMainSideAudio() {
 // INTERACTIVE SOUND
 // -----------------------------------------------------------------------------
 
+function createMobileSideAudio() {
+  const AudioConstructor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioConstructor) return null;
+
+  const sessions = new Map();
+  let unlocked = false;
+
+  function getSession(name) {
+    if (!sessions.has(name)) {
+      const context = new AudioConstructor();
+      const session = { context, active: false, sources: new Map() };
+      sessions.set(name, session);
+      context.addEventListener("statechange", () => {
+        if (session.active && context.state === "interrupted" && !document.hidden) {
+          resume(name).catch(reportError);
+        }
+      });
+    }
+    return sessions.get(name);
+  }
+
+  function reportError(error) {
+    console.warn("Mobile audio could not be resumed.", error);
+  }
+
+  function resume(name) {
+    const session = getSession(name);
+    return session.context.state === "running"
+      ? Promise.resolve()
+      : session.context.resume();
+  }
+
+  function unlock() {
+    // Create and warm every Side's context inside the original Start gesture.
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = "playback"; } catch (error) { reportError(error); }
+    }
+    if (unlocked) return;
+    unlocked = true;
+    ["main", "side2", "side3"].forEach((name) => {
+      const session = getSession(name);
+      const source = session.context.createBufferSource();
+      source.buffer = session.context.createBuffer(1, 1, session.context.sampleRate);
+      source.connect(session.context.destination);
+      source.onended = () => {
+        source.disconnect();
+        if (!session.active) suspend(name).catch(reportError);
+      };
+      source.start(0);
+      resume(name).catch(reportError);
+    });
+  }
+
+  function acquire(name) {
+    const session = getSession(name);
+    session.active = true;
+    return session.context;
+  }
+
+  function trackSource(name, source, gain) {
+    const session = getSession(name);
+    session.sources.set(source, gain);
+    source.onended = () => {
+      session.sources.delete(source);
+      source.disconnect();
+      gain.disconnect();
+    };
+  }
+
+  function suspend(name) {
+    const session = sessions.get(name);
+    if (!session) return Promise.resolve();
+    session.active = false;
+    session.sources.forEach((gain, source) => {
+      source.onended = null;
+      try { source.stop(session.context.currentTime); } catch (error) { /* Already ended. */ }
+      source.disconnect();
+      gain.disconnect();
+    });
+    session.sources.clear();
+    // Keep the authorized context, not the Side's sources or playback.
+    return session.context.suspend().then(() => {
+      if (session.active) return resume(name);
+    }).catch(reportError);
+  }
+
+  function resumeActiveSessions() {
+    if (document.hidden) return;
+    sessions.forEach((session, name) => {
+      if (session.active) resume(name).catch(reportError);
+    });
+  }
+  document.addEventListener("visibilitychange", resumeActiveSessions);
+  window.addEventListener("pageshow", resumeActiveSessions);
+
+  return { unlock, acquire, resume, suspend, trackSource };
+}
+
 function startInteractiveSoundLayer() {
   if (!SOUND_ENABLED) return;
 
@@ -2820,12 +2923,16 @@ function startInteractiveSoundLayer() {
   }
 
   if (!audioContext) {
-    audioContext = new AudioConstructor();
+    audioContext = window.MobileSideAudio
+      ? window.MobileSideAudio.acquire("main")
+      : new AudioConstructor();
     audioNodes = createInteractiveAudioGraph(audioContext);
     createSyntheticChoirVoices(audioContext, audioNodes);
     loadChoirAudioSampleIfNeeded();
     setupSide4SoundtrackSource(audioContext, audioNodes);
     loadSide4SoundtrackIfNeeded();
+  } else if (window.MobileSideAudio) {
+    window.MobileSideAudio.acquire("main");
   }
 
   if (selectedSideNumber === 1) {
@@ -2835,7 +2942,10 @@ function startInteractiveSoundLayer() {
   }
 
   audioStarted = true;
-  audioContext.resume().catch((error) => {
+  const audioResume = window.MobileSideAudio
+    ? window.MobileSideAudio.resume("main")
+    : audioContext.resume();
+  audioResume.catch((error) => {
     console.warn("Audio could not be resumed.", error);
   });
 

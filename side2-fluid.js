@@ -384,7 +384,12 @@
       const time = audioContext.currentTime;
       audioNodes.master.gain.cancelScheduledValues(time);
       audioNodes.master.gain.setValueAtTime(0, time);
-      audioCleanup = audioContext.close().catch(() => {});
+      if (window.MobileSideAudio) {
+        audioNodes.dispose();
+        audioCleanup = window.MobileSideAudio.suspend("side2");
+      } else {
+        audioCleanup = audioContext.close().catch(() => {});
+      }
     }
     audioContext = audioNodes = null;
     audioStarted = false;
@@ -427,12 +432,17 @@
     if (!AudioConstructor) return;
 
     if (!audioContext) {
-      audioContext = new AudioConstructor();
+      audioContext = window.MobileSideAudio
+        ? window.MobileSideAudio.acquire("side2")
+        : new AudioConstructor();
       audioNodes = createAudioGraph(audioContext);
     }
 
     audioStarted = true;
-    audioContext.resume().catch((error) => {
+    const audioResume = window.MobileSideAudio
+      ? window.MobileSideAudio.resume("side2")
+      : audioContext.resume();
+    audioResume.catch((error) => {
       console.warn("Side 2 audio could not be resumed.", error);
     });
   }
@@ -493,7 +503,12 @@
       lowFilter,
       resonator,
       drone,
-      droneGain
+      droneGain,
+      dispose() {
+        drone.stop();
+        [master, lowPresence, delay, feedback, wet, lowFilter, resonator,
+          drone, droneGain, compressor].forEach((node) => node.disconnect());
+      }
     };
   }
 
@@ -4436,6 +4451,11 @@
     low.stop(time + decay + 0.2);
     sub.stop(time + decay + 0.2);
     resonance.stop(time + decay + 0.2);
+    if (window.MobileSideAudio) {
+      window.MobileSideAudio.trackSource("side2", low, lowGain);
+      window.MobileSideAudio.trackSource("side2", sub, subGain);
+      window.MobileSideAudio.trackSource("side2", resonance, resonanceGain);
+    }
     triggerAudioVisualPulse(volume, echo, now);
   }
 

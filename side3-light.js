@@ -259,7 +259,12 @@
       const time = audioContext.currentTime;
       audioNodes.master.gain.cancelScheduledValues(time);
       audioNodes.master.gain.setValueAtTime(0, time);
-      audioCleanup = audioContext.close().catch(() => {});
+      if (window.MobileSideAudio) {
+        audioNodes.dispose();
+        audioCleanup = window.MobileSideAudio.suspend("side3");
+      } else {
+        audioCleanup = audioContext.close().catch(() => {});
+      }
     }
     audioContext = audioNodes = null;
     audioStarted = false;
@@ -291,12 +296,17 @@
     if (!AudioConstructor) return;
 
     if (!audioContext) {
-      audioContext = new AudioConstructor();
+      audioContext = window.MobileSideAudio
+        ? window.MobileSideAudio.acquire("side3")
+        : new AudioConstructor();
       audioNodes = createMusicBoxGraph(audioContext);
     }
 
     audioStarted = true;
-    audioContext.resume().catch((error) => {
+    const audioResume = window.MobileSideAudio
+      ? window.MobileSideAudio.resume("side3")
+      : audioContext.resume();
+    audioResume.catch((error) => {
       console.warn("Side 3 music box audio could not be resumed.", error);
     });
   }
@@ -326,7 +336,10 @@
     limiter.connect(context.destination);
 
     return {
-      master
+      master,
+      dispose() {
+        [master, highpass, lowpass, limiter].forEach((node) => node.disconnect());
+      }
     };
   }
 
@@ -1857,6 +1870,11 @@
     fundamental.stop(startTime + decay + 0.08);
     tine.stop(startTime + decay + 0.08);
     shimmer.stop(startTime + decay + 0.08);
+    if (window.MobileSideAudio) {
+      window.MobileSideAudio.trackSource("side3", fundamental, noteGain);
+      window.MobileSideAudio.trackSource("side3", tine, tineGain);
+      window.MobileSideAudio.trackSource("side3", shimmer, shimmerGain);
+    }
   }
 
   function getHandHeight(side, curved = true) {
